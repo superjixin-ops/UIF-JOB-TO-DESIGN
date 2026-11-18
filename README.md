@@ -490,6 +490,68 @@ Agent 有三个输入源，只有第一个是"用户输入"：
 
 ---
 
+### 记忆系统（`pdc/memory.py`）
+
+对应面试 05 模块。四层结构：
+
+| 层 | 实现 | 生命周期 |
+|---|---|---|
+| 工作记忆 | 当前 prompt | 随请求消失 |
+| 短期 | 滑窗保留最近 N 轮 | 会话内 |
+| 摘要 | 溢出时把旧轮次压成 200 字 | 会话内 + 落盘 |
+| 长期 | 每会话一个 JSONL，可按关键词检索 | 永久 |
+
+刻意做的两个取舍：
+
+- **按 token 截断，不按轮数。** 一轮可能是 10 个字，也可能是 2000 字。
+- **摘要只保留决策、结论、约束、未完成事项**，丢弃寒暄和已被推翻的中间结论。
+
+```bash
+uv run pdc run fact-order-fulfillment.yaml --mode offline --session demo
+# 第一次：[memory] session=demo turns=2 tokens≈18 summary=N
+# 第二次：[memory] session=demo turns=4 tokens≈35 summary=N
+```
+
+落盘可审计：
+
+```json
+{"role": "user", "content": "为 fact-order-fulfillment.yaml 生成设计文档", "tokens": 12}
+```
+
+写入前过 `redact_secrets()`，密钥不会落盘。
+
+### 重排（`pdc/rerank.py`）
+
+召回追求"别漏"，重排追求"最对的排前面"。词法重排三个信号：
+
+| 信号 | 权重 | 说明 |
+|---|---|---|
+| 词覆盖率 | 0.40 | query 的词有多少出现在正文 |
+| 标题命中 | 0.35 | 同样的词出现在标题更重要 |
+| 邻近度 | 0.25 | 多个词在 60 字窗口内共现 |
+
+**实测（6 条 query，34 个 chunk）**：
+
+| 指标 | BM25 | +rerank | 变化 |
+|---|---|---|---|
+| R@1 | 0.500 | 0.500 | +0.000 |
+| R@3 | 0.500 | 0.667 | **+0.167** |
+
+明细里能看出机制也看出局限：
+
+```
+why avoid big SparkSql blocks     rank 4 → 2   ✅ 术语密集，重排有效
+how to handle nullable columns    rank 5 → 6   ❌ 反而退了一步
+what to check before a review     未召回      ❌ 重排救不了召回失败
+```
+
+**结论：重排只能改善排序，不能解决召回问题。** 那条没召回的 query 再怎么重排也是 0。
+这也是为什么要分两级：先保证召回，再谈排序。
+
+`PDC_RERANK=0` 可关闭，方便做对照。
+
+---
+
 ## 一个入口，两种输入
 
 ```bash

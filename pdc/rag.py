@@ -167,11 +167,22 @@ class HybridRetriever:
             return False
 
     # ------------------------------------------------------------------
-    def search(self, query: str, top_k: int = 5) -> list[dict]:
+    def search(self, query: str, top_k: int = 5, rerank: bool | None = None) -> list[dict]:
+        """召回 → 可选重排。
+
+        rerank 默认读环境变量 PDC_RERANK（默认开）。
+        重排候选池比最终 top_k 大一倍，否则重排没有腾挪空间。
+        """
+        if rerank is None:
+            import os
+
+            rerank = os.getenv("PDC_RERANK", "1") != "0"
+
+        pool = max(top_k * 2, top_k)
         bm25_hits = self.index.search(query, top_k=len(self.index.chunks) or 1)
 
         if not self._ensure_vectors():
-            return bm25_hits[:top_k]
+            return _maybe_rerank(query, bm25_hits[:pool], top_k, rerank)
 
         import numpy as np
 
@@ -192,7 +203,15 @@ class HybridRetriever:
             merged.append({**chunk, "score": round(float(score), 4), "degraded": False})
 
         merged.sort(key=lambda x: -x["score"])
-        return merged[:top_k]
+        return _maybe_rerank(query, merged[:pool], top_k, rerank)
+
+
+def _maybe_rerank(query: str, hits: list[dict], top_k: int, enabled: bool) -> list[dict]:
+    if not enabled or len(hits) <= 1:
+        return hits[:top_k]
+    from pdc.rerank import rerank as do_rerank
+
+    return do_rerank(query, hits, top_k=top_k)
 
 
 _INDEX_CACHE: dict[str, RuleIndex] = {}

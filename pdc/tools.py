@@ -142,6 +142,7 @@ class Toolbox:
         return _schema_diff(facts, job_index)
 
     def search_rules(self, query: str, top_k: int = 5) -> list[dict]:
+        # 召回后重排：由 HybridRetriever 内部按 PDC_RERANK 决定
         hits = self.rules.search(query, top_k=top_k)
         if getattr(self.rules, "degraded", False):
             # 让模型和调用方都知道当前是降级状态，而不是静默变差

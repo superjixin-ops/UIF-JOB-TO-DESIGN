@@ -72,6 +72,37 @@ def _make_llm(model: str, route: str):
     return OpenAICompatibleLLM(model)
 
 
+def _load_memory(session_id: str, out_dir: Path):
+    """--session 非空时才启用记忆。不启用时行为完全不变。"""
+    if not session_id:
+        return None
+    from pdc.memory import Memory, SessionStore
+
+    store = SessionStore(out_dir / "memory")
+    return Memory(store, session_id=session_id)
+
+
+def _goal_with_memory(target: str, memory) -> str:
+    if memory is None:
+        return ""
+    ctx = memory.context()
+    if not ctx:
+        return ""
+    return (
+        "以下是这个会话之前的内容，仅作背景参考，不要重复已经做过的事：\n"
+        f"{ctx}\n\n"
+        f"现在为 `{target}` 生成设计文档。"
+    )
+
+
+def _compact(memory, llm) -> None:
+    """窗口溢出时压缩。失败不影响主流程。"""
+    try:
+        memory.compact(lambda prompt: llm.chat([{"role": "user", "content": prompt}], []).content)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[memory] 压缩失败，保留原样: {exc}", file=sys.stderr)
+
+
 def cmd_agent(args: argparse.Namespace) -> int:
     """一个入口，两种输入。
 
@@ -96,6 +127,8 @@ def cmd_agent(args: argparse.Namespace) -> int:
         return audit_main(str(target), model=args.model or "deepseek-chat", out=args.out)
 
     out_dir = Path(args.out)
+    memory = _load_memory(getattr(args, "session", ""), out_dir)
+    goal = _goal_with_memory(args.name, memory)
     tracer = Tracer(path=out_dir / f"{args.name.replace('.yaml', '')}-trace.jsonl")
 
     toolbox = Toolbox(repo=Path(args.repo) if args.repo else None, out_dir=out_dir, tracer=tracer)
@@ -108,7 +141,7 @@ def cmd_agent(args: argparse.Namespace) -> int:
             return 2
         llm = _make_llm(args.model, getattr(args, "route", ""))
 
-    goal = (
+    goal = goal or (
         f"为 pipeline `{args.name}` 生成设计文档。\n"
         f"要求：\n"
         f"1. 先用工具获取事实，不要凭印象\n"
@@ -124,6 +157,14 @@ def cmd_agent(args: argparse.Namespace) -> int:
         max_steps=args.max_steps,
         user_context={"pipeline": args.name, "artifact": args.name},
     )
+
+    if memory is not None:
+        memory.add("user", f"为 {args.name} 生成设计文档")
+        memory.add("assistant", result.output[:2000])
+        if memory.overflow() and args.mode != "offline":
+            _compact(memory, llm)
+        print(f"[memory] session={memory.session_id} turns={len(memory.turns)} "
+              f"tokens≈{memory.used_tokens()} summary={'Y' if memory.summary else 'N'}")
 
     print(result.output)
     print("\n--- trace ---")
@@ -181,6 +222,10 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument(
         "--route", choices=["", "cost", "quality", "balanced"], default="",
         help="启用模型路由与熔断（需 PDC_MODELS 里有多于一个模型）",
+    )
+    a.add_argument(
+        "--session", default="",
+        help="会话 ID。给了就启用记忆（短期窗口 + 摘要 + 落盘）",
     )
     a.set_defaults(func=cmd_agent)
 

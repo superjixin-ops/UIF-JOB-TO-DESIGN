@@ -35,10 +35,12 @@ def test_hybrid_disabled_is_not_degraded(index):
 
 @needs_repo
 def test_hybrid_returns_scored_hits(index):
+    """不开重排时，返回顺序必须按召回分降序。"""
     r = HybridRetriever(index, alpha=0.1, enabled=False)
-    hits = r.search("load schema", top_k=5)
+    hits = r.search("load schema", top_k=5, rerank=False)
     scores = [h["score"] for h in hits]
     assert scores == sorted(scores, reverse=True)
+    assert len(hits) <= 5
 
 
 def test_alpha_bounds_do_not_crash(index):
