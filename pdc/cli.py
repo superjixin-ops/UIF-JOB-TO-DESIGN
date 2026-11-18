@@ -13,6 +13,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 from pdc.agent import run_with_self_check
 from pdc.checks import schema_diff
@@ -95,6 +96,32 @@ def _goal_with_memory(target: str, memory) -> str:
     )
 
 
+def _remember(memory, target: str, result) -> None:
+    """写进记忆的不是原始输出，而是结构化结论。
+
+    直接存 result.output 有两个问题：
+      1. 失败信息（"达到最大步数"）会被当成结论，下一轮污染上下文
+      2. 原文动辄几千字，一个会话几轮就把预算占满
+    所以只存"做了什么、结果如何、发现了几个问题"。
+    """
+    memory.add("user", f"为 {target} 生成设计文档")
+
+    if result.written and not result.issues:
+        files = result.written.get("xlsx", "")
+        memory.add(
+            "assistant",
+            f"已完成：产出设计文档（{files}），自检通过，未解决项 0。",
+        )
+    elif result.written:
+        memory.add(
+            "assistant",
+            f"部分完成：已产出文档，但有 {len(result.issues)} 个未解决问题："
+            + "；".join(result.issues[:3]),
+        )
+    else:
+        memory.add("assistant", f"未完成：{(result.output or '无输出')[:150]}")
+
+
 def _compact(memory, llm) -> None:
     """窗口溢出时压缩。失败不影响主流程。"""
     try:
@@ -150,17 +177,48 @@ def cmd_agent(args: argparse.Namespace) -> int:
         f"4. 最终汇报文件路径和 high 级问题数量"
     )
 
-    result = run_with_self_check(
-        llm,
-        toolbox,
-        goal,
-        max_steps=args.max_steps,
-        user_context={"pipeline": args.name, "artifact": args.name},
-    )
+    engine = getattr(args, "engine", "react")
+
+    if engine == "plan":
+        from pdc.planner import execute_plan
+
+        plan_result = execute_plan(llm, toolbox, goal, max_steps_per_step=4)
+
+        result = SimpleNamespace(
+            output=plan_result.final,
+            steps=plan_result.total_steps,
+            written={},
+            issues=[],
+        )
+        print("[engine=plan] 步骤：")
+        for st in plan_result.plan:
+            print(f"  {st.index}. {st.title}（{st.steps_used} 步）")
+
+    elif engine == "multi":
+        from pdc.multiagent import run_multi
+
+        multi = run_multi(llm, toolbox, goal)
+        result = SimpleNamespace(
+            output=multi.final,
+            steps=multi.total_steps,
+            written={},
+            issues=[],
+        )
+        print("[engine=multi] 调度：")
+        for d in multi.delegations:
+            print(f"  -> {d.worker}: {d.task[:60]}")
+
+    else:
+        result = run_with_self_check(
+            llm,
+            toolbox,
+            goal,
+            max_steps=args.max_steps,
+            user_context={"pipeline": args.name, "artifact": args.name},
+        )
 
     if memory is not None:
-        memory.add("user", f"为 {args.name} 生成设计文档")
-        memory.add("assistant", result.output[:2000])
+        _remember(memory, args.name, result)
         if memory.overflow() and args.mode != "offline":
             _compact(memory, llm)
         print(f"[memory] session={memory.session_id} turns={len(memory.turns)} "
@@ -222,6 +280,10 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument(
         "--route", choices=["", "cost", "quality", "balanced"], default="",
         help="启用模型路由与熔断（需 PDC_MODELS 里有多于一个模型）",
+    )
+    a.add_argument(
+        "--engine", choices=["react", "plan", "multi"], default="react",
+        help="执行范式：react（默认）/ plan（先规划）/ multi（Supervisor+Worker）",
     )
     a.add_argument(
         "--session", default="",

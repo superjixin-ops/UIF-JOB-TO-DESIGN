@@ -552,6 +552,50 @@ what to check before a review     未召回      ❌ 重排救不了召回失败
 
 ---
 
+### 三种执行范式（`--engine`）
+
+对应面试 02 核心框架 + 06 多智能体。
+
+```bash
+uv run pdc run x.yaml --engine react   # 默认：每步看一步
+uv run pdc run x.yaml --engine plan    # 先规划，再逐步执行
+uv run pdc run x.yaml --engine multi   # Supervisor 派活给 Worker
+```
+
+**同一个任务、同一个模型，三种引擎的实测**：
+
+| 引擎 | 步数 | 输入 token | 耗时 | 特点 |
+|---|---|---|---|---|
+| react | 14 | 23,054 | 12s | 最省，局部贪心 |
+| plan | 55 | 52,891 | 25s | 步骤可审查，但**贵 2.3 倍** |
+| multi | 37 | 38,327 | 46s | 上下文隔离，最慢 |
+
+**plan 为什么更贵**：每一步都重新 inspect 一遍 Pipeline，上下文重建。
+理论上"每步只需要局部上下文"，但我的实现没有共享中间产物，
+所以优势没兑现。这是真实缺陷，不是设计意图。
+
+修法写在 roadmap 里：把 facts 存进共享的 `ArtifactStore`，
+让每一步从"读结论"开始而不是"重新查一遍"。
+
+**multi 的收益不在速度，在隔离**：Writer 看到的只有自己的工具和任务，
+不会被 Auditor 的排查过程污染。代价是 Supervisor 多一层调度开销。
+
+### 多智能体的边界（面试必答）
+
+> 唯一硬理由是**上下文隔离**，不是"更聪明"。
+
+`pdc/multiagent.py` 里两个 Worker 的工具是**白名单子集**：
+
+| Worker | 工具 |
+|---|---|
+| auditor | list / inspect / diff / search |
+| writer | inspect / diff / build / write / validate |
+
+Writer 根本拿不到 `list_pipelines`，即使 Supervisor 让它去扫目录也做不到。
+这是"最小权限"在多 Agent 里的落地。
+
+---
+
 ## 一个入口，两种输入
 
 ```bash
