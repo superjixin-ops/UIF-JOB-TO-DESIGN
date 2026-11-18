@@ -706,6 +706,45 @@ uv run pdc run samples/pipelines
 
 ---
 
+## 立刻能演示：本地 + SSH 反向隧道
+
+**零安装、零账号。** 因为 GitHub 被墙，cloudflared / ngrok 的二进制下不下来；
+SSH 是系统自带的，`localhost.run` 支持免密钥隧道。
+
+```bash
+./scripts/serve.sh &            # 起服务（127.0.0.1:8000）
+./scripts/tunnel.sh 8000        # 开隧道，输出一个公网 URL
+```
+
+实测（公网真实访问）：
+
+```
+GET  /health                          HTTP 200
+POST /runs {mode: offline}            200，15 steps，0 issues
+GET  /files/fact-order-fulfillment-design.xlsx   200，14,178 bytes
+GET  /docs                            200
+```
+
+### 三条使用边界
+
+| 限制 | 说明 |
+|---|---|
+| 域名会轮换 | 重启就变。**面试前重跑一次，把新链接发过去** |
+| 进程活着才有 | 关终端即失效 |
+| 只适合演示 | 不要放真实数据，参数是公开的 |
+
+### 常驻链接（如果要写进简历）
+
+需要一台长期在线的机器。可选路径：
+
+1. **GitHub + Railway** —— `github.com:22` 实测可通，用 SSH 推送后连 Railway 自动构建
+2. **Zeabur / Sealos** —— 国内可访问，支持 Docker
+3. **自己的服务器** —— `docker compose up -d`
+
+这三种都需要账号和支付方式，属于一次性配置，不影响本仓库结构。
+
+---
+
 ## 部署
 
 > 关键问题：本地依赖外部数据仓库（私有仓库），容器里没有这个路径，
