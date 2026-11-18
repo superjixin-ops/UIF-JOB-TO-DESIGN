@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -60,6 +61,8 @@ def run_agent(
     user_context: dict | None = None,
     system: str | None = None,
     schemas: list[dict] | None = None,
+    budget: int | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> AgentResult:
     tracer = toolbox.tracer
 
@@ -80,9 +83,24 @@ def run_agent(
     written: dict = {}
     issues: list[str] = []
 
+    spent = 0
+
     for step in range(1, max_steps + 1):
+        # 取消：在每次调模型之前检查，避免多花一次钱
+        if should_stop is not None and should_stop():
+            tracer.record("final", "cancelled", output="用户取消")
+            return AgentResult(output="已取消", steps=step - 1, trace=tracer,
+                               written=written, issues=issues)
+
         with Timer() as t:
             reply = llm.chat(messages, tool_schemas)
+        spent += reply.tokens_in + reply.tokens_out
+        if budget and spent > budget:
+            msg = f"超出本次运行的 token 预算（{spent} > {budget}），已中止"
+            tracer.record("final", "budget_exceeded", output=msg)
+            return AgentResult(output=msg, steps=step, trace=tracer,
+                               written=written, issues=issues)
+
         tracer.record(
             "llm",
             getattr(llm, "name", "llm"),

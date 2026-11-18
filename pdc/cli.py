@@ -204,7 +204,15 @@ def cmd_agent(args: argparse.Namespace) -> int:
     if engine == "plan":
         from pdc.planner import execute_plan
 
-        plan_result = execute_plan(llm, toolbox, goal, max_steps_per_step=4)
+        digest = ""
+        try:
+            digest = toolbox.digest(args.name)
+        except Exception:  # noqa: BLE001 - 取不到就退化成原行为
+            digest = ""
+        plan_result = execute_plan(
+            llm, toolbox, goal, max_steps_per_step=4, digest=digest,
+            schemas=toolbox.tool_schemas(),
+        )
 
         result = SimpleNamespace(
             output=plan_result.final,

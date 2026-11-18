@@ -139,6 +139,26 @@ class Toolbox:
             ],
         }
 
+    def digest(self, name: str) -> str:
+        """把事实压成一段可复用的摘要。
+
+        Plan 模式每一步都重新 inspect，是因为它不知道前一步看到了什么。
+        把摘要直接塞进每步的 prompt，能省掉重复调用——这才是 Plan-and-Execute
+        相对 ReAct 的理论优势。
+        """
+        facts = self._facts_of(name)
+        lines = [f"pipeline: {facts.name} (kind={facts.kind}, owner={facts.owner})"]
+        for j in facts.jobs:
+            cols = [c.name for c in (j.load.schema if j.load else ())]
+            lines.append(
+                f"- job {j.job_type}: extracts={len(j.extracts)}, "
+                f"transforms={len(j.transforms)}, size={j.size}, "
+                f"load_columns={len(cols)}"
+            )
+            if cols:
+                lines.append(f"  columns: {', '.join(cols[:12])}{'...' if len(cols) > 12 else ''}")
+        return "\n".join(lines)
+
     def diff_schema(self, name: str, job_index: int = 0) -> list[str]:
         facts = self._facts_of(name)
         return _schema_diff(facts, job_index)

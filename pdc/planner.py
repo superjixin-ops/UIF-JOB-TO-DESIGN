@@ -91,6 +91,8 @@ def execute_plan(
     max_steps_per_step: int = 4,
     system: str | None = None,
     schemas: list[dict] | None = None,
+    digest: str = "",
+    narrow_tools: bool = True,
 ) -> PlanResult:
     """先规划，再逐步执行，最后汇总。
 
@@ -108,13 +110,23 @@ def execute_plan(
 
     for step in plan:
         carried = "\n".join(f"- {n}" for n in notes[-3:]) or "（无）"
+        facts_block = (
+            f"\n\n已知事实（工具已取回，不要重复 inspect）：\n{digest}" if digest else ""
+        )
         step_goal = (
-            f"{goal}\n\n当前步骤（{step.index}/{len(plan)}）：{step.title}\n"
+            f"{goal}{facts_block}\n\n当前步骤（{step.index}/{len(plan)}）：{step.title}\n"
             f"{step.goal}\n\n前序结论：\n{carried}"
         )
+        # 第二步起不再给 inspect_pipeline：
+        # 实测"在 prompt 里说不要重复 inspect"没用，模型还是会调。
+        # 收窄能力比写提示有效——这也是"工具路由"的真实动机。
+        step_schemas = schemas
+        if narrow_tools and schemas is not None and step.index > 1:
+            step_schemas = [sc for sc in schemas if sc["function"]["name"] != "inspect_pipeline"]
+
         result: AgentResult = run_agent(
             llm, toolbox, step_goal,
-            max_steps=max_steps_per_step, system=system, schemas=schemas,
+            max_steps=max_steps_per_step, system=system, schemas=step_schemas,
         )
         step.result = result.output
         step.steps_used = result.steps

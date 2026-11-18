@@ -628,12 +628,19 @@ uv run pdc run x.yaml --engine multi   # Supervisor 派活给 Worker
 | multi | 37 | 38,327 | 46s | 上下文隔离，最慢 |
 | graph | 7 节点 | — | — | 与 react 等价，多了 checkpoint |
 
-**plan 为什么更贵**：每一步都重新 inspect 一遍 Pipeline，上下文重建。
-理论上"每步只需要局部上下文"，但我的实现没有共享中间产物，
-所以优势没兑现。这是真实缺陷，不是设计意图。
+**plan 为什么更贵**：每步都是一个完整的 agent 会话——system prompt 和工具 schema
+要重复发送，5 步就是 5 份。再加上单文件线性任务本来就不需要全局规划。
 
-修法写在 roadmap 里：把 facts 存进共享的 `ArtifactStore`，
-让每一步从"读结论"开始而不是"重新查一遍"。
+试过两种修法，都没能把它降到 ReAct 以下：
+
+| 尝试 | 结果 |
+|---|---|
+| 把事实摘要注入每步 prompt，并提示"不要重复 inspect" | 53 步 / 57.6k，没改善——**模型照样 inspect** |
+| 从第二步起直接移除 `inspect_pipeline` 工具 | 64 步 / 57.8k，更差——模型改用别的工具绕 |
+
+结论：**收窄工具比写提示有效，但救不了范式不匹配。**
+Plan-and-Execute 适合"多目标、步骤间有依赖"的任务（比如审计整个目录），
+不适合"单文件、流程线性"的文档生成。这不是缺陷，是选型。
 
 **multi 的收益不在速度，在隔离**：Writer 看到的只有自己的工具和任务，
 不会被 Auditor 的排查过程污染。代价是 Supervisor 多一层调度开销。
@@ -703,6 +710,61 @@ uv run pdc run samples/pipelines
 
 规则：**确定性工具算出的数字不需要模型复核，模型自己读出来的才需要。**
 被驳回的结论不会消失，单列在报告「自检驳回」一节。
+
+---
+
+## API 安全与任务模型
+
+公开部署之后补的四件事。**没有它们等于把 key 挂在网上。**
+
+### 鉴权
+
+```bash
+export PDC_API_TOKEN=your-token
+```
+
+| 情况 | 行为 |
+|---|---|
+| 配了 token | 必须带 `Authorization: Bearer <token>` |
+| 没配 + 本机 | 放行（本地开发） |
+| 没配 + 外部 | **401**，并说明"服务未配置 token，拒绝外部访问" |
+
+默认安全，不是默认放行。
+
+### 限流
+
+按 IP 的令牌桶：`PDC_RATE_PER_MIN`（默认 6/分钟），突发 2。
+超出返回 429 + `Retry-After`。
+
+用令牌桶而不是固定窗口：固定窗口在边界会双倍放行。
+
+### 成本护栏
+
+`PDC_RUN_TOKEN_BUDGET`（默认 120,000）。循环里每次调用后累加，超了立刻中止并记录：
+
+```
+超出本次运行的 token 预算（128431 > 120000），已中止
+```
+
+### 异步任务 + 持久化
+
+```
+POST /runs          → 202 {run_id, status:"queued"}   立即返回，不再阻塞 12 秒
+GET  /runs/{id}     → status: queued|running|succeeded|failed|cancelled
+GET  /runs/{id}/trace   → 每一步
+GET  /runs/{id}/stream  → SSE 实时推送
+POST /runs/{id}/cancel  → 软取消（当前步骤结束后停）
+```
+
+任务存在 SQLite（`out/jobs.db`），**重启不丢**。启动时把上次卡在 queued/running 的标成 failed
+（`mark_orphans`），否则用户会看到一个永远转圈的任务。
+
+### 前端
+
+`GET /` 提供控制台：选流水线 → 发起 → 实时时间线 → 下载产物。
+
+单文件 HTML + 原生 JS + EventSource，**没有构建步骤**——因为这台机器没有 node，
+也不想为了一个页面引入工具链。
 
 ---
 
