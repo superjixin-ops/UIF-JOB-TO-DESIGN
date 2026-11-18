@@ -66,6 +66,8 @@ class Toolbox:
             # 默认走混合检索（α=0.1）；PDC_RAG_MODE=bm25 可降级
             self.rules = get_retriever()
         # 审计模式的状态：模型自己决定记什么、看什么
+        # MCP：远端工具。attach 之后 tool_schemas() 会带上，call() 会兜底转发
+        self.mcp = None
         self.audit_findings: list[dict] = []
         self.inspected: list[str] = []
         self.audit_summary: str = ""
@@ -232,9 +234,34 @@ class Toolbox:
 
     # ---------------- 分发 ----------------
 
+    def attach_mcp(self, client) -> None:
+        """挂上一个 MCP 客户端，它的工具会变成可调用的远端工具。"""
+        self.mcp = client
+
+    def tool_schemas(self, include_audit: bool = False) -> list[dict]:
+        """本地工具 + 远端 MCP 工具。重名由 MCP 前缀保证不会冲突。"""
+        schemas = list(self.schemas(include_audit=include_audit))
+        if self.mcp is not None:
+            schemas.extend(self.mcp.tool_schemas())
+        return schemas
+
     def call(self, name: str, args: dict) -> ToolResult:
         fn = self._registry.get(name)
         if fn is None:
+            if self.mcp is not None and name.startswith("mcp_"):
+                start = time.perf_counter()
+                try:
+                    payload = self.mcp.call(name, args)
+                    elapsed = int((time.perf_counter() - start) * 1000)
+                    self.tracer.tool_call(name, args, payload, elapsed,
+                                          error="" if payload["ok"] else "remote_is_error")
+                    return ToolResult(ok=payload["ok"], data=payload["text"],
+                                      error="" if payload["ok"] else payload["text"])
+                except Exception as exc:  # noqa: BLE001
+                    elapsed = int((time.perf_counter() - start) * 1000)
+                    msg = f"{type(exc).__name__}: {exc}"
+                    self.tracer.tool_call(name, args, None, elapsed, error=msg)
+                    return ToolResult(ok=False, error=msg)
             return ToolResult(ok=False, error=f"未知工具: {name}")
         start = time.perf_counter()
         try:

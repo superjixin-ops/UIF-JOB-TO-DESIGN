@@ -552,6 +552,63 @@ what to check before a review     未召回      ❌ 重排救不了召回失败
 
 ---
 
+### MCP（`pdc/mcp_client.py` + `pdc/mcp_server.py`）
+
+MCP 解决的问题是 **N×M 集成**：N 个客户端 × M 个数据源，硬编码要写 N×M 个适配器，
+协议化之后是 N+M。
+
+本仓库两头都有——一个最小 server 和一个客户端，所以能端到端验证：
+
+```bash
+uv run python -m pdc.mcp_server                      # server
+uv run pdc run samples/pipelines --mcp "python -m pdc.mcp_server"
+```
+
+实测 trace 里能看到模型真的用了远端工具：
+
+```
+工具调用分布: {'mcp_find_pipelines': 1, 'inspect_pipeline': 4, 'diff_schema': 4,
+             'search_rules': 4, 'record_finding': 4, 'mcp_pipeline_stats': 1,
+             'finish_audit': 1}
+```
+
+协议三步（面试可以背）：
+
+```
+initialize → notifications/initialized → tools/list → tools/call
+```
+
+三个工程细节：
+
+| 细节 | 为什么 |
+|---|---|
+| 工具名加 `mcp_` 前缀 | 避免和本地 7 个工具重名 |
+| 读取放后台线程 + 队列 | `readline` 在 macOS 上不好设超时，线程最稳 |
+| server 的业务异常包成 `isError` | 协议要求错误也是正常响应，不能让进程崩 |
+
+**为什么自己写 server**：本机没有 node，官方 filesystem server 跑不起来；
+而且协议很小，写一遍比读十篇文档更懂。
+
+### LangGraph（`pdc/langgraph_engine.py`）
+
+`--engine graph` 用真正的 LangGraph 实现同一个 ReAct 循环。
+
+概念映射：
+
+| 手写版 | LangGraph |
+|---|---|
+| `messages` 列表 | `State`（TypedDict） |
+| `while` 循环 | 图的边 |
+| `if not tool_calls: return` | 条件边 `should_continue` |
+| `max_steps` 计数 | `recursion_limit` |
+| 自己序列化状态 | checkpointer（`MemorySaver`） |
+
+**收益不是"更聪明"，是可中断、可回放、可视化。** 代价是多一层抽象，出错时栈更深。
+
+实测：`--engine graph` 跑完 7 个节点步、18 条消息，产出与手写版一致。
+
+---
+
 ### 三种执行范式（`--engine`）
 
 对应面试 02 核心框架 + 06 多智能体。
@@ -569,6 +626,7 @@ uv run pdc run x.yaml --engine multi   # Supervisor 派活给 Worker
 | react | 14 | 23,054 | 12s | 最省，局部贪心 |
 | plan | 55 | 52,891 | 25s | 步骤可审查，但**贵 2.3 倍** |
 | multi | 37 | 38,327 | 46s | 上下文隔离，最慢 |
+| graph | 7 节点 | — | — | 与 react 等价，多了 checkpoint |
 
 **plan 为什么更贵**：每一步都重新 inspect 一遍 Pipeline，上下文重建。
 理论上"每步只需要局部上下文"，但我的实现没有共享中间产物，

@@ -151,7 +151,20 @@ def cmd_agent(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
-        return audit_main(str(target), model=args.model or "deepseek-chat", out=args.out)
+        mcp_client = None
+        if getattr(args, "mcp", ""):
+            from pdc.mcp_client import MCPClient
+
+            mcp_client = MCPClient(args.mcp.split()).start()
+            print(f"[mcp] 已连接，工具: {[t['name'] for t in mcp_client.tools]}")
+        try:
+            return audit_main(
+                str(target), model=args.model or "deepseek-chat",
+                out=args.out, mcp_client=mcp_client,
+            )
+        finally:
+            if mcp_client is not None:
+                mcp_client.close()
 
     out_dir = Path(args.out)
     memory = _load_memory(getattr(args, "session", ""), out_dir)
@@ -159,6 +172,15 @@ def cmd_agent(args: argparse.Namespace) -> int:
     tracer = Tracer(path=out_dir / f"{args.name.replace('.yaml', '')}-trace.jsonl")
 
     toolbox = Toolbox(repo=Path(args.repo) if args.repo else None, out_dir=out_dir, tracer=tracer)
+
+    mcp_cmd = getattr(args, "mcp", "")
+    mcp_client = None
+    if mcp_cmd:
+        from pdc.mcp_client import MCPClient
+
+        mcp_client = MCPClient(mcp_cmd.split()).start()
+        toolbox.attach_mcp(mcp_client)
+        print(f"[mcp] 已连接，工具: {[t['name'] for t in mcp_client.tools]}")
 
     if args.mode == "offline":
         llm = RuleBasedLLM()
@@ -194,6 +216,18 @@ def cmd_agent(args: argparse.Namespace) -> int:
         for st in plan_result.plan:
             print(f"  {st.index}. {st.title}（{st.steps_used} 步）")
 
+    elif engine == "graph":
+        from pdc.langgraph_engine import run_graph
+
+        g = run_graph(llm, toolbox, goal, max_steps=args.max_steps)
+        result = SimpleNamespace(
+            output=g["output"] or "（图执行结束，无最终文本）",
+            steps=g["steps"],
+            written={},
+            issues=[],
+        )
+        print(f"[engine=graph] 节点步数 {g['steps']}，消息 {len(g['messages'])} 条")
+
     elif engine == "multi":
         from pdc.multiagent import run_multi
 
@@ -223,6 +257,9 @@ def cmd_agent(args: argparse.Namespace) -> int:
             _compact(memory, llm)
         print(f"[memory] session={memory.session_id} turns={len(memory.turns)} "
               f"tokens≈{memory.used_tokens()} summary={'Y' if memory.summary else 'N'}")
+
+    if mcp_client is not None:
+        mcp_client.close()
 
     print(result.output)
     print("\n--- trace ---")
@@ -282,8 +319,12 @@ def main(argv: list[str] | None = None) -> int:
         help="启用模型路由与熔断（需 PDC_MODELS 里有多于一个模型）",
     )
     a.add_argument(
-        "--engine", choices=["react", "plan", "multi"], default="react",
-        help="执行范式：react（默认）/ plan（先规划）/ multi（Supervisor+Worker）",
+        "--mcp", default="",
+        help='连接 MCP server，例如 --mcp "python -m pdc.mcp_server"',
+    )
+    a.add_argument(
+        "--engine", choices=["react", "plan", "multi", "graph"], default="react",
+        help="执行范式：react / plan / multi / graph（LangGraph）",
     )
     a.add_argument(
         "--session", default="",

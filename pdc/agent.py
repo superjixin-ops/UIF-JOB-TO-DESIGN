@@ -76,7 +76,7 @@ def run_agent(
         {"role": "system", "content": system or SYSTEM_PROMPT},
         {"role": "user", "content": goal, "context": user_context or {}},
     ]
-    tool_schemas = schemas if schemas is not None else Toolbox.schemas()
+    tool_schemas = schemas if schemas is not None else toolbox.tool_schemas()
     written: dict = {}
     issues: list[str] = []
 

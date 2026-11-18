@@ -23,6 +23,7 @@ from pathlib import Path
 
 from pdc.agent import AgentResult, run_agent
 from pdc.tools import Toolbox
+from pdc.trace import Tracer
 
 AUDIT_PROMPT = """你是数据流水线审计员。用户会给你一个目录，你在里面自主查找值得关注的问题。
 
@@ -126,12 +127,20 @@ def run_audit(
     max_files: int = 6,
     max_steps: int = 18,
     out_dir: Path | None = None,
+    mcp_client=None,
 ) -> AuditResult:
     scope = Path(scope)
     if not scope.exists():
         raise FileNotFoundError(f"目录不存在: {scope}")
 
-    toolbox = Toolbox(repo=scope, out_dir=out_dir or Path("out/audit"))
+    work_dir = out_dir or Path("out/audit")
+    work_dir.mkdir(parents=True, exist_ok=True)
+    toolbox = Toolbox(
+        repo=scope, out_dir=work_dir,
+        tracer=Tracer(path=work_dir / "audit-trace.jsonl"),
+    )
+    if mcp_client is not None:
+        toolbox.attach_mcp(mcp_client)
     system = AUDIT_PROMPT.format(max_files=max_files, max_steps=max_steps)
 
     goal = (
@@ -145,7 +154,7 @@ def run_audit(
         goal,
         max_steps=max_steps,
         system=system,
-        schemas=Toolbox.schemas(include_audit=True),
+        schemas=toolbox.tool_schemas(include_audit=True),
     )
 
     kept, rejected = verify_findings(llm, list(toolbox.audit_findings))
@@ -213,13 +222,16 @@ def render_report(result: AuditResult, scope: Path, out_path: Path) -> Path:
     return out_path
 
 
-def main(scope: str, model: str = "deepseek-chat", out: str = "out/audit") -> int:
+def main(scope: str, model: str = "deepseek-chat", out: str = "out/audit",
+         mcp_client=None) -> int:
     from pdc.llm import OpenAICompatibleLLM
 
     out_dir = Path(out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    result = run_audit(OpenAICompatibleLLM(model), scope, out_dir=out_dir)
+    result = run_audit(
+        OpenAICompatibleLLM(model), scope, out_dir=out_dir, mcp_client=mcp_client,
+    )
     report = render_report(result, Path(scope), out_dir / "audit-report.md")
 
     print(f"检查了 {len(result.inspected)} 个文件，{result.steps} 步")
