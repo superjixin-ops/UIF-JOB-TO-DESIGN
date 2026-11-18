@@ -420,50 +420,55 @@ run-c    anchors=0 problems=0
 
 ---
 
-## 两种运行模式：一个说明"为什么它是 agent"，一个说明"AI 值多少"
+## 一个入口，两种输入
 
-| | `pdc agent <file>` | `pdc audit <dir>` |
+```bash
+pdc run <pipeline.yaml>    # 给文件 → 生成设计文档（目标固定）
+pdc run <directory>        # 给目录 → 审计（目标开放）
+```
+
+同一个 Agent，面对不同输入时目标不同。**不是两个模式，是一个入口。**
+
+| | 给文件 | 给目录 |
 |---|---|---|
-| 任务 | 目标固定：为这个文件生成文档 | **目标开放**：这个目录有什么问题 |
-| 看哪些文件 | 只有一个 | **模型自己决定** |
-| 什么时候停 | 文档校验通过 | **模型说够了** |
-| 能否写 SOP | 能（`--mode offline` 已验证） | **不能** |
-| 产出 | 8 张表的文档 | 审计报告 + 自检驳回记录 |
+| 目标 | 为这个文件生成文档 | 找出值得关注的问题 |
+| 看哪些输入 | 就这一个 | **模型自己决定** |
+| 何时停 | 文档校验通过 | **模型说够了** |
+| 能否写 SOP | 能（`--mode offline` 可复现） | **不能** |
+| 需要模型 | 可选 | 必须 |
 
-**`audit` 没有 offline 版本，这不是偷懒。** 因为"先看哪个、看几个算够"写不出固定流程——
-这正是"真 agent"和"工作流"的分界线。
+目录审计无法用 SOP 实现，所以它没有 offline 版本——**这就是 workflow 和 agent 的分界线**。
 
 ### 实测（真实模型，同一目录两次）
 
 ```
-第 1 次：13 步，4 个文件，发现 3 条
-第 2 次：10 步，4 个文件，发现 4 条
+第 1 次：10 步，4 个文件，发现 3 条
+第 2 次：13 步，4 个文件，发现 3 条（条目不同）
 ```
 
-**步数和顺序都不同**，因为路径不是写死的。
+步数与顺序都不同，因为路径不是写死的。
 
 ```bash
 export OPENAI_BASE_URL=https://api.deepseek.com
 export OPENAI_API_KEY=sk-...
-uv run pdc audit samples/pipelines
+uv run pdc run samples/pipelines
 ```
 
 ### generator-critic：让它查自己
 
-审计循环产出的每条结论都要过一道核查。但核查**按证据来源分流**：
+审计产出的每条结论都要过一道核查，但**按证据来源分流**：
 
 | basis | 含义 | 是否核查 |
 |---|---|---|
 | `tool` | 数字来自 `diff_schema` 等工具 | **跳过** |
-| `file` | 模型自己读文件看出来的 | **核查** |
+| `file` | 模型自己读文件看出来的 | **必须核查** |
 
 这个分流是被一次事故逼出来的：第一版让 critic 核查所有结论，
 它用"读 YAML 数一数"的方式去核实"7 列未声明"，结果自己数错了，
 **把真问题驳回了**。
 
-规则是：**确定性工具算出的数字不需要模型复核，模型自己读出来的才需要。**
-
-被驳回的结论不会消失，会单独列在报告的「自检驳回」一节——保留证据链。
+规则：**确定性工具算出的数字不需要模型复核，模型自己读出来的才需要。**
+被驳回的结论不会消失，单列在报告「自检驳回」一节。
 
 ---
 
@@ -549,12 +554,12 @@ cd ~/Desktop/Agent\ Learning/pipeline-copilot
   samples/pipelines/fact-order-fulfillment.yaml
 
 # 3. 完整 Agent 循环（offline：SOP 驱动）
-~/.local/bin/uv run pdc agent fact-order-fulfillment.yaml --mode offline
+~/.local/bin/uv run pdc run fact-order-fulfillment.yaml --mode offline
 
 # 4. 接真实模型
 export OPENAI_API_KEY=sk-...
 export OPENAI_BASE_URL=https://api.deepseek.com/v1      # 或任何 OpenAI 兼容网关
-~/.local/bin/uv run pdc agent fact-order-fulfillment.yaml \
+~/.local/bin/uv run pdc run fact-order-fulfillment.yaml \
   --mode auto --model deepseek-chat
 
 # 5. 评测

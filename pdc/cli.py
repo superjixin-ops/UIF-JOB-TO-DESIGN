@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -59,6 +60,28 @@ def cmd_design(args: argparse.Namespace) -> int:
 
 
 def cmd_agent(args: argparse.Namespace) -> int:
+    """一个入口，两种输入。
+
+    给文件 → 生成设计文档（目标固定）
+    给目录 → 审计（目标开放，模型自己决定看什么）
+
+    这不是两个模式，是同一个 agent 面对不同输入时的两种目标。
+    """
+    target = Path(args.name)
+
+    if target.is_dir():
+        from pdc.audit import main as audit_main
+
+        # 目录审计无法用 SOP 实现，所以不看 --mode，只看有没有模型可用
+        if not (os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY")):
+            print(
+                "目录审计需要真实模型：它要自己决定看哪些文件，写不出固定流程。\n"
+                "请先设置 OPENAI_API_KEY（或 DEEPSEEK_API_KEY）。",
+                file=sys.stderr,
+            )
+            return 2
+        return audit_main(str(target), model=args.model or "deepseek-chat", out=args.out)
+
     out_dir = Path(args.out)
     tracer = Tracer(path=out_dir / f"{args.name.replace('.yaml', '')}-trace.jsonl")
 
@@ -135,20 +158,14 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--out", default=str(DEFAULT_OUT))
     d.set_defaults(func=cmd_design)
 
-    a = sub.add_parser("agent", help="完整 Agent 循环")
-    a.add_argument("name", help="pipeline 文件名")
+    a = sub.add_parser("run", help="一个入口：给文件生成文档，给目录做审计")
+    a.add_argument("name", help="pipeline 文件名，或要审计的目录")
     a.add_argument("--mode", choices=["offline", "auto"], default="offline")
-    a.add_argument("--model", default="")
+    a.add_argument("--model", default="deepseek-chat")
     a.add_argument("--repo", default="")
     a.add_argument("--out", default=str(DEFAULT_OUT))
     a.add_argument("--max-steps", type=int, default=15)
     a.set_defaults(func=cmd_agent)
-
-    au = sub.add_parser("audit", help="开放式审计：给目录，自己决定看什么")
-    au.add_argument("scope", help="要审计的目录")
-    au.add_argument("--model", default="deepseek-chat")
-    au.add_argument("--out", default=str(DEFAULT_OUT / "audit"))
-    au.set_defaults(func=cmd_audit)
 
     e = sub.add_parser("eval", help="跑评测集")
     e.add_argument("--cases", type=int, default=20)
