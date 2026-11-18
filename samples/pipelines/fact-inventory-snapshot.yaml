@@ -1,0 +1,102 @@
+apiVersion: crd.example.io/v1
+kind: FactPipeline
+metadata:
+  name: fact-inventory-snapshot
+spec:
+  owner:
+    name: Demo
+    github: '@demo/analytics'
+    contact: demo@example.com
+  jobs:
+    - jobType: eid
+      extract:
+        - extractType: default
+          alias: STOCK_SNAPSHOT
+          main_df: true
+          connections:
+            - credentials: demo-cos
+              connector: cos
+              alias: SUPPLY_LANDING
+              query: landing/inventory/stock_snapshot/transform.parquet
+        - extractType: default
+          alias: STOCK_ADJUSTMENTS
+          main_df: true
+          connections:
+            - credentials: demo-cos
+              connector: cos
+              alias: SUPPLY_LANDING
+              query: landing/inventory/stock_adjustments/transform.parquet
+        - extractType: default
+          alias: DIM_WAREHOUSE
+          main_df: false
+          connections:
+            - credentials: demo-api
+              connector: skapi
+              query: WAREHOUSE_DIMENSION
+              keyName: SURROGATE_KEY
+              naturalKey:
+                - WAREHOUSE_CODE
+      transform:
+        - transformType: JoinByExpression
+          objectNames:
+            - STOCK_SNAPSHOT
+            - DIM_WAREHOUSE
+          joinExpression: STOCK_SNAPSHOT.WAREHOUSE_CODE = DIM_WAREHOUSE.WAREHOUSE_CODE
+          joinType: left
+          columnsToSelect:
+            - STOCK_SNAPSHOT.*
+            - DIM_WAREHOUSE.SURROGATE_KEY as SK_WAREHOUSE
+          aliasResult: STOCK_SNAPSHOT
+        - transformType: JoinByExpression
+          objectNames:
+            - STOCK_SNAPSHOT
+            - STOCK_ADJUSTMENTS
+          joinExpression: STOCK_SNAPSHOT.SNAPSHOT_DATE = STOCK_ADJUSTMENTS.ADJUSTMENT_DATE
+          joinType: inner
+          columnsToSelect:
+            - STOCK_SNAPSHOT.*
+            - STOCK_ADJUSTMENTS.ADJUSTMENT_QUANTITY
+          aliasResult: STOCK_SNAPSHOT
+        - transformType: UniqueID
+          objectNames:
+            - STOCK_SNAPSHOT
+          columns:
+            - INVENTORY_KEY
+          mode: overwrite
+          aliasResult: STOCK_SNAPSHOT
+      load:
+        metadata:
+          name: FACT_INVENTORY_SNAPSHOT
+          documentation: daily inventory snapshot
+        schema:
+          - columnName: INVENTORY_KEY
+            dataType: IntegerType
+            nullAble: false
+          - columnName: SNAPSHOT_DATE
+            dataType: DateType
+            nullAble: false
+          - columnName: WAREHOUSE_CODE
+            dataType: StringType
+            nullAble: false
+          - columnName: SK_WAREHOUSE
+            dataType: IntegerType
+            nullAble: true
+          - columnName: PRODUCT_CODE
+            dataType: StringType
+            nullAble: false
+          - columnName: ON_HAND_QUANTITY
+            dataType: IntegerType
+            nullAble: true
+          - columnName: ADJUSTMENT_QUANTITY
+            dataType: IntegerType
+            nullAble: true
+        connections:
+          - loadObject: FACT_INVENTORY_SNAPSHOT
+            credentials: demo-cos
+            connector: cos
+            mode: overwrite
+            numPartitions: 32
+            alias: SUPPLY_LANDING
+            query: fact/FACT_INVENTORY_SNAPSHOT
+      setups:
+        size: M

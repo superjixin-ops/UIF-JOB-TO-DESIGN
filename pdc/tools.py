@@ -65,6 +65,10 @@ class Toolbox:
         else:
             # 默认走混合检索（α=0.1）；PDC_RAG_MODE=bm25 可降级
             self.rules = get_retriever()
+        # 审计模式的状态：模型自己决定记什么、看什么
+        self.audit_findings: list[dict] = []
+        self.inspected: list[str] = []
+        self.audit_summary: str = ""
         self._registry: dict[str, Callable[..., Any]] = {
             "list_pipelines": self.list_pipelines,
             "inspect_pipeline": self.inspect_pipeline,
@@ -73,6 +77,8 @@ class Toolbox:
             "build_design": self.build_design,
             "write_document": self.write_document,
             "validate_document": self.validate_document,
+            "record_finding": self.record_finding,
+            "finish_audit": self.finish_audit,
         }
 
     # ---------------- 工具实现 ----------------
@@ -97,6 +103,8 @@ class Toolbox:
             raise FileNotFoundError(f"找不到 pipeline: {name}")
         facts = parse_pipeline(matches[0])
         self._facts[name] = facts
+        if name not in self.inspected:
+            self.inspected.append(name)
         return facts
 
     def inspect_pipeline(self, name: str) -> dict:
@@ -178,6 +186,49 @@ class Toolbox:
             "grounded": not violations,
         }
 
+    def record_finding(
+        self,
+        severity: str,
+        title: str,
+        detail: str,
+        evidence: str = "",
+        basis: str = "file",
+    ) -> dict:
+        """模型把发现写进报告。
+
+        basis 表示结论的来源，决定它要不要被 critic 核查：
+            tool —— 来自 diff_schema 这类确定性工具，数字由代码算出，不需要模型复核
+            file —— 来自模型自己读文件，需要 critic 对照原文核实
+        这个区分是被一次事故逼出来的：critic 用读 YAML 的方式去核查
+        "7 列未声明"，结果自己数错了，把真问题驳回了。
+        """
+        if severity not in ("high", "check", "info"):
+            raise ValueError(f"severity 只能是 high/check/info，收到 {severity!r}")
+        if basis not in ("tool", "file"):
+            raise ValueError(f"basis 只能是 tool/file，收到 {basis!r}")
+        if not title.strip() or not detail.strip():
+            raise ValueError("title 和 detail 不能为空")
+        if evidence and not Path(evidence).exists():
+            raise FileNotFoundError(f"evidence 路径不存在: {evidence}")
+        item = {
+            "severity": severity,
+            "title": title.strip(),
+            "detail": detail.strip(),
+            "evidence": evidence,
+            "basis": basis,
+        }
+        self.audit_findings.append(item)
+        return {"recorded": len(self.audit_findings), "total": item}
+
+    def finish_audit(self, summary: str) -> dict:
+        """明确结束审计。模型必须自己决定什么时候停。"""
+        self.audit_summary = summary.strip()
+        return {
+            "findings": len(self.audit_findings),
+            "inspected_files": self.inspected,
+            "summary": self.audit_summary,
+        }
+
     # ---------------- 分发 ----------------
 
     def call(self, name: str, args: dict) -> ToolResult:
@@ -199,7 +250,7 @@ class Toolbox:
     # ---------------- 给模型的 schema ----------------
 
     @staticmethod
-    def schemas() -> list[dict]:
+    def schemas(include_audit: bool = False) -> list[dict]:
         def fn(name: str, desc: str, props: dict, required: list[str]) -> dict:
             return {
                 "type": "function",
@@ -260,6 +311,40 @@ class Toolbox:
                 "返回文件路径。",
                 {"name": {"type": "string"}},
                 ["name"],
+            ),
+            *(
+                [
+                    fn(
+                        "record_finding",
+                        "记录一条审计发现。严重度判据：high=静默失败（数据会错但不报警），"
+                        "check=需要人确认，info=失败了会立刻响或属启发式。"
+                        "evidence 必须是真实存在的文件路径，否则会被拒绝。",
+                        {
+                            "severity": {"type": "string", "enum": ["high", "check", "info"]},
+                            "title": {"type": "string"},
+                            "detail": {"type": "string", "description": "说清问题、影响、以及你不确定什么"},
+                            "evidence": {"type": "string", "description": "文件路径"},
+                            "basis": {
+                                "type": "string",
+                                "enum": ["tool", "file"],
+                                "description": (
+                                    "结论来源。用 diff_schema 等工具算出来的填 tool；"
+                                    "自己读文件看出来的填 file。工具算出的数字不需要复核，"
+                                    "自己读的要被复核。"
+                                ),
+                            },
+                        },
+                        ["severity", "title", "detail", "basis"],
+                    ),
+                    fn(
+                        "finish_audit",
+                        "结束审计并给出总结。只有当你认为覆盖已经足够、或者预算用完时调用。",
+                        {"summary": {"type": "string"}},
+                        ["summary"],
+                    ),
+                ]
+                if include_audit
+                else []
             ),
             fn(
                 "validate_document",

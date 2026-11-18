@@ -102,6 +102,12 @@ def cmd_agent(args: argparse.Namespace) -> int:
     return 0 if not result.issues else 1
 
 
+def cmd_audit(args: argparse.Namespace) -> int:
+    from pdc.audit import main as audit_main
+
+    return audit_main(args.scope, model=args.model, out=args.out)
+
+
 def cmd_eval(args: argparse.Namespace) -> int:
     from eval.run import main as eval_main
     from pdc.scoring import parse_weights
@@ -137,6 +143,12 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--out", default=str(DEFAULT_OUT))
     a.add_argument("--max-steps", type=int, default=15)
     a.set_defaults(func=cmd_agent)
+
+    au = sub.add_parser("audit", help="开放式审计：给目录，自己决定看什么")
+    au.add_argument("scope", help="要审计的目录")
+    au.add_argument("--model", default="deepseek-chat")
+    au.add_argument("--out", default=str(DEFAULT_OUT / "audit"))
+    au.set_defaults(func=cmd_audit)
 
     e = sub.add_parser("eval", help="跑评测集")
     e.add_argument("--cases", type=int, default=20)

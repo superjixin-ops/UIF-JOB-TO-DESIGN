@@ -1,0 +1,74 @@
+apiVersion: crd.example.io/v1
+kind: FactPipeline
+metadata:
+  name: dim-product-family
+spec:
+  owner:
+    name: Demo
+    github: '@demo/analytics'
+    contact: demo@example.com
+  jobs:
+    - jobType: eid
+      extract:
+        - extractType: default
+          alias: PRODUCT_FAMILY_SOURCE
+          main_df: true
+          connections:
+            - credentials: demo-api
+              connector: skapi
+              query: PRODUCT_FAMILY_DIMENSION
+              keyName: SURROGATE_KEY
+              naturalKey:
+                - FAMILY_CODE
+      transform:
+        - transformType: Select
+          objectNames:
+            - PRODUCT_FAMILY_SOURCE
+          columns:
+            - SURROGATE_KEY
+            - FAMILY_CODE
+            - FAMILY_NAME
+            - CATEGORY_CODE
+            - MARGIN_TARGET_PCT
+          aliasResult: PRODUCT_FAMILY_SOURCE
+        - transformType: Trim
+          objectNames:
+            - PRODUCT_FAMILY_SOURCE
+          columns:
+            - FAMILY_CODE
+            - FAMILY_NAME
+            - CATEGORY_CODE
+          aliasResult: PRODUCT_FAMILY_SOURCE
+      load:
+        metadata:
+          name: PRODUCT_FAMILY_DIMENSION
+          documentation: product family reference data
+        schema:
+          - columnName: SURROGATE_KEY
+            dataType: IntegerType
+            nullAble: false
+          - columnName: FAMILY_CODE
+            dataType: StringType
+            nullAble: false
+          - columnName: FAMILY_NAME
+            dataType: StringType
+            nullAble: false
+          - columnName: CATEGORY_CODE
+            dataType: StringType
+            nullAble: true
+          - columnName: MARGIN_TARGET_PCT
+            dataType: DecimalType
+            dataTypeArgs:
+              precision: 5
+              scale: 2
+            nullAble: true
+        connections:
+          - credentials: demo-cos
+            connector: cos
+            mode: overwrite
+            loadObject: PRODUCT_FAMILY_DIMENSION
+            numPartitions: 1
+            alias: ANALYTICS
+            query: dimension/PRODUCT_FAMILY_DIMENSION/transform.parquet
+      setups:
+        size: T

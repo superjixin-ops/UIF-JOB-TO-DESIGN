@@ -56,19 +56,21 @@ def run_agent(
     max_steps: int = 15,
     max_tool_result_chars: int = 8000,
     user_context: dict | None = None,
+    system: str | None = None,
+    schemas: list[dict] | None = None,
 ) -> AgentResult:
     tracer = toolbox.tracer
     messages: list[dict] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system or SYSTEM_PROMPT},
         {"role": "user", "content": goal, "context": user_context or {}},
     ]
-    schemas = Toolbox.schemas()
+    tool_schemas = schemas if schemas is not None else Toolbox.schemas()
     written: dict = {}
     issues: list[str] = []
 
     for step in range(1, max_steps + 1):
         with Timer() as t:
-            reply = llm.chat(messages, schemas)
+            reply = llm.chat(messages, tool_schemas)
         tracer.record(
             "llm",
             getattr(llm, "name", "llm"),

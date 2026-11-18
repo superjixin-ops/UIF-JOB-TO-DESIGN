@@ -28,6 +28,24 @@ CONNECTOR_LABEL = {
 }
 
 
+CRED_FAMILIES = ("cos", "skapi", "jdbc", "db2", "erdm")
+
+
+def _credential_family(name: str) -> str:
+    """从凭证名或 connector 名推断它属于哪个系统。
+
+    认不出来就返回空串，表示"无法判断"，此时不报警——
+    宁可漏报也不要制造噪音。
+    """
+    low = (name or "").lower()
+    if "jdbc" in low:
+        return "jdbc"
+    for key in CRED_FAMILIES:
+        if key in low:
+            return "jdbc" if key == "db2" else key
+    return ""
+
+
 def _size_note(specs: list[JobSpec]) -> str:
     return " / ".join(f"{j.job_type}: {j.size}" for j in specs)
 
@@ -252,16 +270,26 @@ def derive_findings(facts: PipelineFacts) -> list[Finding]:
                 )
             )
 
-    # 5. 凭证与 connector 不匹配（skapi 却用 cos 凭证之类）
+    # 5. 凭证与 connector 不匹配
+    #
+    # 之前是白名单硬编码 ("", "skapi", "cos")，凡是叫 demo-api 的都被误报。
+    # 改成按"凭证族"判断：只有凭证名明显属于另一个系统时才报。
+    # 这也是为什么这条是 info——启发式必然有误报，不能给高严重度。
     for job in facts.jobs:
         for e in job.extracts:
-            if e.connector == "skapi" and e.credentials not in ("", "skapi", "cos"):
+            cred_family = _credential_family(e.credentials)
+            conn_family = _credential_family(e.connector)
+            if cred_family and conn_family and cred_family != conn_family:
                 out.append(
                     Finding(
                         code="credential_mismatch",
                         severity="info",
-                        title=f"{e.alias} 的凭证与 connector 不匹配",
-                        detail=f"connector={e.connector}, credentials={e.credentials}",
+                        title=f"{e.alias} 的凭证与 connector 可能不匹配",
+                        detail=(
+                            f"connector={e.connector}（{conn_family}），"
+                            f"credentials={e.credentials}（{cred_family}）。"
+                            "凭证可能是共享别名，需 owner 确认。"
+                        ),
                     )
                 )
 
