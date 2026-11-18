@@ -1,0 +1,263 @@
+apiVersion: crd.example.io/v1
+kind: FactPipeline
+metadata:
+  name: dim-customer-segment
+spec:
+  owner:
+    name: Demo
+    github: '@demo/analytics'
+    contact: demo@example.com
+  jobs:
+    - jobType: eid
+      extract:
+        - extractType: default
+          alias: CUSTOMER_SEGMENT_SOURCE
+          main_df: true
+          connections:
+            - credentials: demo-api
+              connector: erdm_api
+              query: 2048/json
+              fields:
+                - segmentCode
+                - segmentName
+                - segmentGroup
+                - priority
+                - activeFlag
+                - lastChanged
+      transform:
+        - transformType: RenameColumns
+          objectNames:
+            - CUSTOMER_SEGMENT_SOURCE
+          mapColumns:
+            segmentCode: CUSTOMER_SEGMENT_CODE
+            segmentName: CUSTOMER_SEGMENT_NAME
+            segmentGroup: SEGMENT_GROUP
+            priority: SEGMENT_PRIORITY
+            activeFlag: SEGMENT_STATUS
+            lastChanged: LAST_UPDATED_TIMESTAMP
+          aliasResult: CUSTOMER_SEGMENT_SOURCE
+
+        - transformType: Trim
+          objectNames:
+            - CUSTOMER_SEGMENT_SOURCE
+          columns:
+            - CUSTOMER_SEGMENT_CODE
+            - CUSTOMER_SEGMENT_NAME
+            - SEGMENT_GROUP
+            - SEGMENT_STATUS
+          aliasResult: CUSTOMER_SEGMENT_SOURCE
+
+        - transformType: AddSurrogateKey
+          aliasResult: CUSTOMER_SEGMENT_SOURCE
+          objectNames:
+            - CUSTOMER_SEGMENT_SOURCE
+          surrogateKeyName: SURROGATE_KEY
+          dimensionName: CUSTOMER_SEGMENT_DIMENSION
+          naturalKeys:
+            - CUSTOMER_SEGMENT_CODE
+          deltaColumns:
+            - CUSTOMER_SEGMENT_CODE
+            - CUSTOMER_SEGMENT_NAME
+            - SEGMENT_GROUP
+            - SEGMENT_PRIORITY
+            - SEGMENT_STATUS
+            - LAST_UPDATED_TIMESTAMP
+          dimensionSchema:
+            -   - SURROGATE_KEY
+                - INTEGER
+            -   - CUSTOMER_SEGMENT_CODE
+                - VARCHAR
+            -   - CUSTOMER_SEGMENT_NAME
+                - VARCHAR
+            -   - SEGMENT_GROUP
+                - VARCHAR
+            -   - SEGMENT_PRIORITY
+                - INTEGER
+            -   - SEGMENT_STATUS
+                - VARCHAR
+            -   - LAST_UPDATED_TIMESTAMP
+                - DATE
+            -   - EFFECTIVE_DATE
+                - DATE
+            -   - REVISION
+                - INTEGER
+            -   - DELETED
+                - VARCHAR
+            -   - PLACEHOLDER
+                - VARCHAR
+            -   - PLACEHOLDER_SOURCE_OBJECT
+                - VARCHAR
+            -   - PLACEHOLDER_SOURCE_SYSTEM
+                - VARCHAR
+            -   - AUDIT_TIMESTAMP
+                - DATE
+          bucket: ANALYTICS
+          surrogateKeyConfigs:
+            taxonomyName: CUSTOMER_SEGMENT_DIMENSION
+            bucketOverride: ANALYTICS
+
+        - transformType: AddColumns
+          objectNames:
+            - CUSTOMER_SEGMENT_SOURCE
+          columns:
+            - DELETED
+          value: when((col("SEGMENT_STATUS") == 'I'), True).otherwise(False)
+          aliasResult: CUSTOMER_SEGMENT_SOURCE
+
+        - transformType: Cast
+          objectNames:
+            - CUSTOMER_SEGMENT_SOURCE
+          columns:
+            - DELETED
+          columnsType: BOOLEAN
+          aliasResult: CUSTOMER_SEGMENT_SOURCE
+      load:
+        metadata:
+          name: CUSTOMER_SEGMENT_DIMENSION
+          documentation: customer segment reference data
+        schema:
+          - columnName: SURROGATE_KEY
+            dataType: IntegerType
+            nullAble: false
+          - columnName: CUSTOMER_SEGMENT_CODE
+            dataType: StringType
+            nullAble: false
+          - columnName: CUSTOMER_SEGMENT_NAME
+            dataType: StringType
+            nullAble: false
+          - columnName: SEGMENT_GROUP
+            dataType: StringType
+            nullAble: true
+          - columnName: SEGMENT_PRIORITY
+            dataType: IntegerType
+            nullAble: true
+          - columnName: SEGMENT_STATUS
+            dataType: StringType
+            nullAble: false
+          - columnName: LAST_UPDATED_TIMESTAMP
+            dataType: TimestampType
+            nullAble: false
+          - columnName: EFFECTIVE_DATE
+            dataType: DateType
+            nullAble: false
+          - columnName: REVISION
+            dataType: IntegerType
+            nullAble: false
+          - columnName: DELETED
+            dataType: BooleanType
+            nullAble: false
+          - columnName: PLACEHOLDER
+            dataType: BooleanType
+            nullAble: false
+          - columnName: PLACEHOLDER_SOURCE_OBJECT
+            dataType: StringType
+            nullAble: true
+          - columnName: PLACEHOLDER_SOURCE_SYSTEM
+            dataType: StringType
+            nullAble: true
+          - columnName: AUDIT_TIMESTAMP
+            dataType: TimestampType
+            nullAble: false
+        connections:
+          - credentials: demo-cos
+            connector: cos
+            mode: append
+            loadObject: CUSTOMER_SEGMENT_DIMENSION
+            numPartitions: 1
+            alias: ANALYTICS
+            query: dimension/CUSTOMER_SEGMENT_DIMENSION/transform.parquet
+      setups:
+        size: T
+
+    - jobType: datamart-parquet
+      extract:
+        - extractType: default
+          alias: DIM_CUSTOMER_SEGMENT
+          main_df: true
+          connections:
+            - credentials: demo-cos
+              connector: cos
+              alias: ANALYTICS
+              query: dimension/CUSTOMER_SEGMENT_DIMENSION/transform.parquet
+      transform:
+        - transformType: FilterType2
+          objectNames:
+            - DIM_CUSTOMER_SEGMENT
+          groupByKey: SURROGATE_KEY
+          includeDeleted: true
+          aliasResult: DIM_CUSTOMER_SEGMENT
+        - transformType: RenameColumns
+          objectNames:
+            - DIM_CUSTOMER_SEGMENT
+          mapColumns:
+            SURROGATE_KEY: SK_CUSTOMER_SEGMENT
+          aliasResult: DIM_CUSTOMER_SEGMENT
+        - transformType: Select
+          objectNames:
+            - DIM_CUSTOMER_SEGMENT
+          columns:
+            - SK_CUSTOMER_SEGMENT
+            - CUSTOMER_SEGMENT_CODE
+            - CUSTOMER_SEGMENT_NAME
+            - SEGMENT_GROUP
+            - SEGMENT_PRIORITY
+            - SEGMENT_STATUS
+            - LAST_UPDATED_TIMESTAMP
+            - DELETED
+            - AUDIT_TIMESTAMP
+          aliasResult: DIM_CUSTOMER_SEGMENT
+        - transformType: AddRow
+          objectNames:
+            - DIM_CUSTOMER_SEGMENT
+          columns:
+            - columnsNames:
+                - SK_CUSTOMER_SEGMENT
+              columnsValue: -1
+            - columnsNames:
+                - SEGMENT_STATUS
+              columnsValue: A
+            - columnsNames:
+                - DELETED
+              columnsValue: false
+          remainingColumnsValue: Unassigned
+          aliasResult: DIM_CUSTOMER_SEGMENT
+      load:
+        metadata:
+          name: DIM_CUSTOMER_SEGMENT
+          documentation: customer segment datamart dimension
+        schema:
+          - columnName: SK_CUSTOMER_SEGMENT
+            dataType: IntegerType
+            nullAble: false
+          - columnName: CUSTOMER_SEGMENT_CODE
+            dataType: StringType
+            nullAble: false
+          - columnName: CUSTOMER_SEGMENT_NAME
+            dataType: StringType
+            nullAble: false
+          - columnName: SEGMENT_GROUP
+            dataType: StringType
+            nullAble: false
+          - columnName: SEGMENT_PRIORITY
+            dataType: IntegerType
+            nullAble: false
+          - columnName: SEGMENT_STATUS
+            dataType: StringType
+            nullAble: false
+          - columnName: LAST_UPDATED_TIMESTAMP
+            dataType: TimestampType
+            nullAble: false
+          - columnName: DELETED
+            dataType: BooleanType
+            nullAble: false
+          - columnName: AUDIT_TIMESTAMP
+            dataType: TimestampType
+            nullAble: false
+        connections:
+          - credentials: demo-cos
+            connector: cos
+            alias: ANALYTICS
+            mode: overwrite
+            query: datamart/dimension/DIM_CUSTOMER_SEGMENT/transform.parquet
+      setups:
+        size: T

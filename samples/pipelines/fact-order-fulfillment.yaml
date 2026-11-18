@@ -1,0 +1,361 @@
+apiVersion: crd.example.io/v1
+kind: FactPipeline
+metadata:
+  name: fact-order-fulfillment
+spec:
+  owner:
+    name: Demo
+    github: '@demo/analytics'
+    contact: demo@example.com
+  jobs:
+    - jobType: eid
+      extract:
+        - extractType: default
+          alias: ORDER_LINES
+          main_df: true
+          connections:
+            - credentials: demo-cos
+              connector: cos
+              alias: SALES_LANDING
+              query: landing/orders/order_lines/transform.parquet
+        - extractType: default
+          alias: DIM_CUSTOMER
+          main_df: false
+          connections:
+            - credentials: demo-api
+              connector: skapi
+              requestFlags:
+                includeDeleted: false
+              query: CUSTOMER_DIMENSION
+              keyName: SURROGATE_KEY
+              naturalKey:
+                - CUSTOMER_ID
+        - extractType: default
+          alias: DIM_PRODUCT
+          main_df: false
+          connections:
+            - credentials: demo-api
+              connector: skapi
+              requestFlags:
+                includeDeleted: false
+              query: PRODUCT_DIMENSION
+              keyName: SURROGATE_KEY
+              naturalKey:
+                - PRODUCT_CODE
+        - extractType: default
+          alias: DIM_DATE
+          main_df: false
+          connections:
+            - credentials: demo-api
+              connector: skapi
+              query: CALENDAR_DIMENSION
+              keyName: SURROGATE_KEY
+              naturalKey:
+                - DATE
+      transform:
+        - transformType: Select
+          objectNames:
+            - ORDER_LINES
+          columns:
+            - ORDER_ID
+            - ORDER_LINE_ID
+            - CUSTOMER_ID
+            - PRODUCT_CODE
+            - ORDER_DATE
+            - QUANTITY
+            - UNIT_PRICE_USD
+            - LINE_AMOUNT_USD
+            - ORDER_STATUS
+            - SHIPPING_REGION
+            - CHANNEL
+            - WAREHOUSE_CODE
+          aliasResult: ORDER_LINES
+
+        - transformType: FilterData
+          objectNames:
+            - ORDER_LINES
+          whereClause: "ORDER_STATUS = 'SHIPPED'"
+          aliasResult: ORDER_LINES
+
+        - transformType: RenameColumns
+          objectNames:
+            - ORDER_LINES
+          mapColumns:
+            ORDER_LINE_ID: ORDER_LINE_NUMBER
+            LINE_AMOUNT_USD: LINE_AMOUNT
+            SHIPPING_REGION: REGION_CODE
+          aliasResult: ORDER_LINES
+
+        - transformType: JoinByExpression
+          objectNames:
+            - ORDER_LINES
+            - DIM_CUSTOMER
+          joinExpression: ORDER_LINES.CUSTOMER_ID = DIM_CUSTOMER.CUSTOMER_ID
+          joinType: left
+          columnsToSelect:
+            - ORDER_LINES.*
+            - DIM_CUSTOMER.SURROGATE_KEY as SK_CUSTOMER
+            - DIM_CUSTOMER.CUSTOMER_SEGMENT
+            - DIM_CUSTOMER.CUSTOMER_COUNTRY
+          aliasResult: ORDER_LINES
+
+        - transformType: JoinByExpression
+          objectNames:
+            - ORDER_LINES
+            - DIM_PRODUCT
+          joinExpression: ORDER_LINES.PRODUCT_CODE = DIM_PRODUCT.PRODUCT_CODE
+          joinType: left
+          columnsToSelect:
+            - ORDER_LINES.*
+            - DIM_PRODUCT.SURROGATE_KEY as SK_PRODUCT
+            - DIM_PRODUCT.PRODUCT_FAMILY
+          aliasResult: ORDER_LINES
+
+        - transformType: JoinByExpression
+          objectNames:
+            - ORDER_LINES
+            - DIM_DATE
+          joinExpression: ORDER_LINES.ORDER_DATE = DIM_DATE.DATE
+          joinType: left
+          columnsToSelect:
+            - ORDER_LINES.*
+            - DIM_DATE.SURROGATE_KEY as SK_ORDER_DATE
+            - DIM_DATE.FISCAL_QUARTER
+            - DIM_DATE.FISCAL_YEAR
+          aliasResult: ORDER_LINES
+
+        - transformType: AddColumns
+          objectNames:
+            - ORDER_LINES
+          columns:
+            - GROSS_MARGIN_USD
+          value: expr("LINE_AMOUNT - (QUANTITY * UNIT_COST_USD)")
+          aliasResult: ORDER_LINES
+
+        - transformType: Drop
+          objectNames:
+            - ORDER_LINES
+          columns:
+            - CUSTOMER_ID
+            - PRODUCT_CODE
+            - ORDER_DATE
+            - ORDER_STATUS
+          aliasResult: ORDER_LINES
+
+        - transformType: FillNA
+          objectNames:
+            - ORDER_LINES
+          value: -1
+          columns:
+            - SK_CUSTOMER
+            - SK_PRODUCT
+            - SK_ORDER_DATE
+          aliasResult: ORDER_LINES
+
+        - transformType: CurrentDate
+          objectNames:
+            - ORDER_LINES
+          columnName: AUDIT_TIMESTAMP
+          level: now
+          aliasResult: ORDER_LINES
+
+        - transformType: UniqueID
+          objectNames:
+            - ORDER_LINES
+          columns:
+            - ORDER_FULFILLMENT_KEY
+          mode: overwrite
+          aliasResult: ORDER_LINES
+      load:
+        metadata:
+          name: FACT_ORDER_FULFILLMENT
+          documentation: order fulfillment fact, shipped lines only
+        schema:
+          - columnName: ORDER_FULFILLMENT_KEY
+            dataType: IntegerType
+            nullAble: false
+          - columnName: ORDER_LINE_NUMBER
+            dataType: StringType
+            nullAble: false
+          - columnName: ORDER_ID
+            dataType: StringType
+            nullAble: false
+          - columnName: SK_CUSTOMER
+            dataType: IntegerType
+            nullAble: false
+          - columnName: CUSTOMER_SEGMENT
+            dataType: StringType
+            nullAble: true
+          - columnName: CUSTOMER_COUNTRY
+            dataType: StringType
+            nullAble: true
+          - columnName: SK_PRODUCT
+            dataType: IntegerType
+            nullAble: false
+          - columnName: PRODUCT_FAMILY
+            dataType: StringType
+            nullAble: true
+          - columnName: SK_ORDER_DATE
+            dataType: IntegerType
+            nullAble: false
+          - columnName: FISCAL_QUARTER
+            dataType: StringType
+            nullAble: true
+          - columnName: FISCAL_YEAR
+            dataType: StringType
+            nullAble: true
+          - columnName: QUANTITY
+            dataType: IntegerType
+            nullAble: true
+          - columnName: UNIT_PRICE_USD
+            dataType: DecimalType
+            dataTypeArgs:
+              precision: 18
+              scale: 2
+            nullAble: true
+          - columnName: LINE_AMOUNT
+            dataType: DecimalType
+            dataTypeArgs:
+              precision: 18
+              scale: 2
+            nullAble: true
+          - columnName: GROSS_MARGIN_USD
+            dataType: DecimalType
+            dataTypeArgs:
+              precision: 18
+              scale: 2
+            nullAble: true
+          - columnName: REGION_CODE
+            dataType: StringType
+            nullAble: true
+          - columnName: CHANNEL
+            dataType: StringType
+            nullAble: true
+          - columnName: WAREHOUSE_CODE
+            dataType: StringType
+            nullAble: true
+          - columnName: AUDIT_TIMESTAMP
+            dataType: TimestampType
+            nullAble: false
+        connections:
+          - loadObject: FACT_ORDER_FULFILLMENT
+            credentials: demo-cos
+            connector: cos
+            mode: overwrite
+            numPartitions: 64
+            alias: SALES_LANDING
+            query: fact/FACT_ORDER_FULFILLMENT
+      setups:
+        size: L
+
+    - jobType: datamart-parquet
+      extract:
+        - extractType: default
+          alias: ORDER_FULFILLMENT_FACT
+          main_df: true
+          connections:
+            - credentials: demo-cos
+              connector: cos
+              alias: SALES_LANDING
+              query: fact/FACT_ORDER_FULFILLMENT/*
+      transform:
+        - transformType: Drop
+          objectNames:
+            - ORDER_FULFILLMENT_FACT
+          columns:
+            - WAREHOUSE_CODE
+          aliasResult: ORDER_FULFILLMENT_FACT
+        - transformType: RenameColumns
+          objectNames:
+            - ORDER_FULFILLMENT_FACT
+          mapColumns:
+            ORDER_FULFILLMENT_KEY: SK_ORDER_FULFILLMENT
+            ORDER_DATE: SK_ORDER_DATE_PLACEHOLDER
+          aliasResult: ORDER_FULFILLMENT_FACT
+        - transformType: CurrentDate
+          objectNames:
+            - ORDER_FULFILLMENT_FACT
+          columnName: AUDIT_TIMESTAMP
+          level: now
+          aliasResult: ORDER_FULFILLMENT_FACT
+      load:
+        metadata:
+          name: ORDER_FULFILLMENT_FACT
+          documentation: datamart parquet for order fulfillment
+        schema:
+          - columnName: SK_ORDER_FULFILLMENT
+            dataType: IntegerType
+            nullAble: false
+          - columnName: ORDER_LINE_NUMBER
+            dataType: StringType
+            nullAble: false
+          - columnName: ORDER_ID
+            dataType: StringType
+            nullAble: false
+          - columnName: SK_CUSTOMER
+            dataType: IntegerType
+            nullAble: false
+          - columnName: CUSTOMER_SEGMENT
+            dataType: StringType
+            nullAble: true
+          - columnName: SK_PRODUCT
+            dataType: IntegerType
+            nullAble: false
+          - columnName: PRODUCT_FAMILY
+            dataType: StringType
+            nullAble: true
+          - columnName: SK_ORDER_DATE
+            dataType: IntegerType
+            nullAble: false
+          - columnName: QUANTITY
+            dataType: IntegerType
+            nullAble: true
+          - columnName: LINE_AMOUNT
+            dataType: DecimalType
+            dataTypeArgs:
+              precision: 18
+              scale: 2
+            nullAble: true
+          - columnName: AUDIT_TIMESTAMP
+            dataType: TimestampType
+            nullAble: false
+        connections:
+          - credentials: demo-cos
+            connector: cos
+            mode: overwrite
+            numPartitions: 1
+            loadObject: ORDER_FULFILLMENT_FACT
+            partitionBy:
+              - SK_ORDER_DATE
+            alias: SALES_LANDING
+            query: datamart/fact/ORDER_FULFILLMENT_FACT/transform.parquet
+      setups:
+        size: S
+
+    - jobType: datamart-self-serve
+      extract:
+        - extractType: default
+          alias: ORDER_FULFILLMENT_FACT
+          main_df: true
+          connections:
+            - credentials: demo-cos
+              connector: cos
+              alias: SALES_LANDING
+              query: datamart/fact/ORDER_FULFILLMENT_FACT/transform.parquet
+      transform:
+        - transformType: Drop
+          objectNames:
+            - ORDER_FULFILLMENT_FACT
+          columns:
+            - SK_ORDER_DATE_PLACEHOLDER
+          aliasResult: ORDER_FULFILLMENT_FACT
+      load:
+        connections:
+          - credentials: demo-db2
+            connector: jdbc
+            mode: overwrite
+            query: ANALYTICS.FACT_ORDER_FULFILLMENT
+            tableSpace: TS_ANALYTICS
+            flipAlias: true
+      setups:
+        size: T
