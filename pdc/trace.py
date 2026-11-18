@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Self
 
+from pdc.safety import redact_secrets
+
 
 @dataclass
 class Step:
@@ -96,6 +98,7 @@ def _trim(value: Any, limit: int = 2000) -> Any:
     if value is None:
         return None
     if isinstance(value, str):
+        value = redact_secrets(value)
         return value if len(value) <= limit else value[:limit] + f"...<{len(value) - limit} chars>"
     if isinstance(value, (dict, list)):
         text = json.dumps(value, ensure_ascii=False, default=str)

@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from pdc.llm import LLM
+from pdc.safety import scan as scan_injection
+from pdc.safety import wrap_untrusted
 from pdc.tools import Toolbox, ToolResult
 from pdc.trace import Timer, Tracer
 
@@ -60,6 +62,16 @@ def run_agent(
     schemas: list[dict] | None = None,
 ) -> AgentResult:
     tracer = toolbox.tracer
+
+    # 第一层防线：用户目标也可能是注入源（比如从工单系统粘过来的文本）
+    hits = scan_injection(goal)
+    if hits:
+        tracer.record(
+            "safety", "goal_injection_scan",
+            input=goal[:200],
+            output=[{"kind": h.kind, "excerpt": h.excerpt} for h in hits],
+        )
+
     messages: list[dict] = [
         {"role": "system", "content": system or SYSTEM_PROMPT},
         {"role": "user", "content": goal, "context": user_context or {}},
@@ -119,7 +131,12 @@ def run_agent(
             if len(text) > max_tool_result_chars:
                 text = text[:max_tool_result_chars] + f"...<truncated {len(text) - max_tool_result_chars} chars>"
 
-            messages.append({"role": "tool", "tool_call_id": call.id, "content": text})
+            # 第二层防线：工具返回的内容是"数据"，不是"指令"
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": wrap_untrusted(text, label=f"tool:{call.name}"),
+            })
 
     tracer.record("final", "max_steps_reached", output=f"达到最大步数 {max_steps}")
     return AgentResult(

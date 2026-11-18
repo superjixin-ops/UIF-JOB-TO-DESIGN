@@ -59,6 +59,19 @@ def cmd_design(args: argparse.Namespace) -> int:
     return 0
 
 
+def _make_llm(model: str, route: str):
+    """route 非空且目录里有多个模型时，启用路由 + 熔断。"""
+    from pdc.routing import RoutedLLM, Router, load_catalog
+
+    catalog = load_catalog(os.getenv("PDC_MODELS"))
+    if route and len(catalog) > 1:
+        return RoutedLLM(
+            Router(catalog, prefer=route),
+            lambda name: OpenAICompatibleLLM(name),
+        )
+    return OpenAICompatibleLLM(model)
+
+
 def cmd_agent(args: argparse.Namespace) -> int:
     """一个入口，两种输入。
 
@@ -93,7 +106,7 @@ def cmd_agent(args: argparse.Namespace) -> int:
         if not args.model:
             print("auto 模式需要 --model，或使用 --mode offline", file=sys.stderr)
             return 2
-        llm = OpenAICompatibleLLM(args.model)
+        llm = _make_llm(args.model, getattr(args, "route", ""))
 
     goal = (
         f"为 pipeline `{args.name}` 生成设计文档。\n"
@@ -165,6 +178,10 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--repo", default="")
     a.add_argument("--out", default=str(DEFAULT_OUT))
     a.add_argument("--max-steps", type=int, default=15)
+    a.add_argument(
+        "--route", choices=["", "cost", "quality", "balanced"], default="",
+        help="启用模型路由与熔断（需 PDC_MODELS 里有多于一个模型）",
+    )
     a.set_defaults(func=cmd_agent)
 
     e = sub.add_parser("eval", help="跑评测集")
