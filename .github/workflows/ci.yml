@@ -43,12 +43,13 @@ jobs:
       - name: Surface build error
         if: failure()
         run: |
-          {
-            echo '### docker build failed'
-            echo '```'
-            tail -50 build.log
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          # job summary 不进 check-run API，但 error 注解会。
+          # 没有 admin 权限下载日志时，这是唯一能看到错误原因的公开通道。
+          echo '### docker build failed' >> "$GITHUB_STEP_SUMMARY"
+          grep -iE "error|failed|cannot|not found|no such" build.log | tail -8 |             while IFS= read -r line; do
+              echo "::error::$line"
+            done
+          tail -30 build.log >> "$GITHUB_STEP_SUMMARY"
 
       - name: Smoke test image
         run: |
