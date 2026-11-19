@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import json
+import statistics
 import sys
 import tempfile
 import time
@@ -31,12 +32,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pdc.design import build_design  # noqa: E402
-from pdc.design_reader import read_design  # noqa: E402
-from pdc.llm import build_llm  # noqa: E402
-from pdc.parser import parse_pipeline  # noqa: E402
-from pdc.render import render_xlsx  # noqa: E402
-from pdc.yamlgen import requirement_from_design, run_build  # noqa: E402
+from pdc.design import build_design
+from pdc.design_reader import read_design
+from pdc.llm import build_llm
+from pdc.parser import parse_pipeline
+from pdc.render import render_xlsx
+from pdc.yamlgen import requirement_from_design, run_build
 
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLES = ROOT / "samples" / "pipelines"
@@ -69,6 +70,51 @@ def _document_loss(original: Path, spec) -> int:
             if (job.job_type, e.alias) not in captured:
                 loss += 1
     return loss
+
+
+def aggregate(reports: list[dict]) -> dict:
+    """把多次运行的报告合成均值 ± 标准差。
+
+    为什么必须报方差：同一份文档跑三遍，轮数会在 1~3 之间跳。
+    只报一次最好成绩，是评测里最常见的撒谎方式。
+    """
+    if not reports:
+        return {}
+    n = len(reports)
+
+    def ms(values: list[float]) -> dict:
+        mean = statistics.mean(values)
+        std = statistics.stdev(values) if len(values) > 1 else 0.0
+        return {"mean": round(mean, 4), "std": round(std, 4), "n": len(values)}
+
+    per_case: dict[str, dict] = {}
+    for case in reports[0]["cases"]:
+        name = case["case"]
+        rounds = [
+            next(c["rounds"] for c in r["cases"] if c["case"] == name) for r in reports
+        ]
+        tokens = [
+            next(c["tokens"] for c in r["cases"] if c["case"] == name) for r in reports
+        ]
+        per_case[name] = {
+            "rounds": [int(x) for x in rounds],
+            "tokens": [int(x) for x in tokens],
+            "pass": sum(
+                1 for r in reports
+                if next(c["passed"] for c in r["cases"] if c["case"] == name)
+            ),
+            "n": n,
+        }
+
+    return {
+        "n": n,
+        "pass_rate": ms([r["summary"]["pass_rate"] for r in reports]),
+        "avg_rounds": ms([r["summary"]["avg_rounds"] for r in reports]),
+        "avg_tokens": ms([float(r["summary"]["avg_tokens"]) for r in reports]),
+        "exact_match_rate": ms([r["summary"]["exact_match_rate"] for r in reports]),
+        "stuck_events": [r["summary"]["stuck_events"] for r in reports],
+        "per_case": per_case,
+    }
 
 
 def run(cases: int = 20, model: str = "deepseek-chat") -> dict:
@@ -144,11 +190,48 @@ def run(cases: int = 20, model: str = "deepseek-chat") -> dict:
     return report
 
 
+def run_repeated(cases: int = 20, model: str = "deepseek-chat", repeat: int = 3) -> dict:
+    reports = []
+    for i in range(1, repeat + 1):
+        print(f"===== RUN {i}/{repeat} =====")
+        report = run(cases=cases, model=model)
+        reports.append(report)
+        (OUT / f"report-run{i}.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    summary = aggregate(reports)
+    (OUT / "report.json").write_text(
+        json.dumps({"summary": summary, "runs": reports}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    print(f"\n--- variance (n={summary['n']}) ---")
+    print(f"pass_rate     {summary['pass_rate']['mean']:.2f} ± {summary['pass_rate']['std']:.2f}")
+    print(f"avg_rounds    {summary['avg_rounds']['mean']:.2f} ± {summary['avg_rounds']['std']:.2f}")
+    print(
+        f"avg_tokens    {summary['avg_tokens']['mean']:,.0f} ± "
+        f"{summary['avg_tokens']['std']:,.0f}"
+    )
+    print(
+        f"exact_match   {summary['exact_match_rate']['mean']:.3f} ± "
+        f"{summary['exact_match_rate']['std']:.3f}"
+    )
+    print("\n逐用例轮数：")
+    for name, row in summary["per_case"].items():
+        print(f"  {name:26} {row['rounds']}  pass {row['pass']}/{row['n']}")
+    print(f"\nreport: {OUT / 'report.json'}")
+    return {"summary": summary, "runs": reports}
+
+
 if __name__ == "__main__":
     import argparse
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--cases", type=int, default=20)
     ap.add_argument("--model", default="deepseek-chat")
+    ap.add_argument("--repeat", type=int, default=1, help="重复次数，>1 时输出均值 ± 标准差")
     a = ap.parse_args()
-    run(cases=a.cases, model=a.model)
+    if a.repeat > 1:
+        run_repeated(cases=a.cases, model=a.model, repeat=a.repeat)
+    else:
+        run(cases=a.cases, model=a.model)
