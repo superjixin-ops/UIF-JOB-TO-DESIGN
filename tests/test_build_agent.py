@@ -482,3 +482,44 @@ def test_job_size_is_contract(tmp_path: Path) -> None:
     _, text = _spec_and_text(tmp_path)
     broken = text.replace("      setups:\n        size: L", "      setups:\n        size: XL", 1)
     assert "S_SIZE" in _codes_after(tmp_path, broken)
+
+
+# ---------------------------------------------------------------------------
+# 5. 逐键审计工具：测"你没想到的东西"
+# ---------------------------------------------------------------------------
+def test_fidelity_reports_zero_on_faithful_copy(tmp_path: Path) -> None:
+    from eval.fidelity import audit
+
+    src = SAMPLES / "fact-order-fulfillment.yaml"
+    copy = tmp_path / "copy.yaml"
+    copy.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    assert audit(src, copy) == []
+
+
+def test_fidelity_catches_connection_level_drift(tmp_path: Path) -> None:
+    """连接级字段掉了必须能报出来——这是校验器报 1.0 的那次事故。"""
+    from eval.fidelity import audit
+
+    src = SAMPLES / "fact-order-fulfillment.yaml"
+    broken = tmp_path / "broken.yaml"
+    text = src.read_text(encoding="utf-8").replace("              keyName: SURROGATE_KEY\n", "", 1)
+    broken.write_text(text, encoding="utf-8")
+
+    diffs = audit(src, broken)
+    assert diffs
+    assert any("keyName" in str(d) for d in diffs)
+
+
+def test_fidelity_catches_fabricated_field(tmp_path: Path) -> None:
+    """多出来的字段也要报。编造和遗漏一样是失真。"""
+    from eval.fidelity import audit
+
+    src = SAMPLES / "dim-product-family.yaml"
+    broken = tmp_path / "extra.yaml"
+    text = src.read_text(encoding="utf-8").replace(
+        "            connector: cos\n", "            connector: cos\n            madeUpKey: x\n", 1
+    )
+    broken.write_text(text, encoding="utf-8")
+
+    diffs = audit(src, broken)
+    assert any("madeUpKey" in str(d) for d in diffs)

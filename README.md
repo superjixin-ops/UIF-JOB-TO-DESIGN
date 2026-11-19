@@ -8,7 +8,7 @@
 |---|---|
 | 仓库 | [superjixin-ops/UIF-JOB-TO-DESIGN](https://github.com/superjixin-ops/UIF-JOB-TO-DESIGN) |
 | 在线演示 | `https://3eea34987613e6.app.lhr.life`（临时隧道，token `demo-token`） |
-| 规模 | **195 测试** · 37 模块 · 7,723 行主代码 + 2,495 行测试 |
+| 规模 | **198 测试** · 37 模块 · 7,723 行主代码 + 2,536 行测试 |
 | 效果 | 设计文档 **4 小时 → 13 秒**；反向生成 **留一法 4/4 通过**，平均 2 轮、约 $0.02 一条；143 个键值与源文件零差异 |
 | 技术栈 | Python 3.12 · FastAPI · asyncio · SQLite · LangGraph · MCP |
 
@@ -60,6 +60,16 @@ uv run pdc parse out/fact-order-fulfillment.yaml
 1. **裁判先行**——`spec_validator`（结构/契约/安全）+ `spec_grounding`（事实对齐）
 2. **硬门禁**——模型调 `finish` 时重新校验，不过就驳回并附错误清单
 3. **卡住换策略**——连续 3 轮同一组错误，强制整篇重写
+
+**逐键保真审计**（不看指标，直接比源文件和产物）：
+
+```bash
+uv run python -m eval.fidelity samples/pipelines/fact-order-fulfillment.yaml out/fact-order-fulfillment.yaml
+# 源 201 个键值，缺/不同 0 个
+```
+
+这条命令比所有指标都重要：指标只能测你想到的东西，它测你没想到的。
+第一次用它，就在"校验器报 1.0"的产物上找出 14 个丢失字段。
 
 **留一法评测**（生成 A 时示例里只有 B/C/D，防止抄答案）：
 
@@ -146,9 +156,9 @@ pdc/
   trace.py                 全链路追踪（含脱敏）
   api.py / cli.py          接口层
   ui/index.html            单文件控制台
-eval/      四指标评测 + 审计 golden set + 反向生成留一法评测
+eval/      四指标评测 + 审计 golden set + 反向生成留一法 + 逐键保真审计
 rag/       检索评测、α 扫描、A/B、引用分析
-tests/     195 个用例
+tests/     198 个用例
 loadtest/  并发压测
 samples/   虚构样例数据（可公开）
 scripts/   本地启动 + 隧道
