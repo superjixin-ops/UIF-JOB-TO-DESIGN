@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,13 @@ class ExtractSpec:
     query: str
     main_df: bool = False
     natural_key: tuple[str, ...] = ()
+    # 连接级参数。这些字段原来不进文档，导致"文档 -> YAML"会静默丢掉它们。
+    # 用 tuple-of-pairs 而不是 dict：dataclass 是 frozen 的，dict 会让它不可哈希。
+    extract_type: str = "default"
+    conn_alias: str = ""
+    key_name: str = ""
+    flags: tuple[tuple[str, Any], ...] = ()
+    template_source: str = ""
 
 
 @dataclass(frozen=True)
@@ -48,6 +56,8 @@ class LoadObject:
     mode: str = ""
     partitions: int | None = None
     partition_by: tuple[str, ...] = ()
+    # 原始 loadObject。和 metadata.name 是两回事，混在一起模型只能猜。
+    load_object: str = ""
 
 
 @dataclass(frozen=True)
@@ -60,6 +70,10 @@ class LoadSpec:
     schema: tuple[Column, ...] = ()
     partition_by: tuple[str, ...] = ()
     objects: tuple[LoadObject, ...] = ()
+    credentials: str = ""
+    conn_alias: str = ""
+    table_space: str = ""
+    flip_alias: bool = False
 
 
 @dataclass(frozen=True)

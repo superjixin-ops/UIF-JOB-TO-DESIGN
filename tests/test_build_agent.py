@@ -400,3 +400,85 @@ def test_expected_items_counts_the_contract_not_the_output(tmp_path: Path) -> No
     facts = parse_pipeline(SAMPLES / "dim-product-family.yaml")
     spec = read_design(render_xlsx(build_design(facts), tmp_path / "i.xlsx"))
     assert expected_items(spec) >= sum(len(load.columns) for load in spec.loads)
+
+
+# ---------------------------------------------------------------------------
+# 4. 连接级参数：文档看不见的字段 = 校验器的盲区
+# ---------------------------------------------------------------------------
+def _spec_and_text(tmp_path: Path, name: str = "fact-order-fulfillment"):
+    facts = parse_pipeline(SAMPLES / f"{name}.yaml")
+    spec = read_design(render_xlsx(build_design(facts), tmp_path / "s.xlsx"))
+    text = (SAMPLES / f"{name}.yaml").read_text(encoding="utf-8")
+    return spec, text
+
+
+def _codes_after(tmp_path: Path, text: str, name: str = "fact-order-fulfillment") -> set[str]:
+    spec, _ = _spec_and_text(tmp_path, name)
+    path = tmp_path / "mutated.yaml"
+    path.write_text(text, encoding="utf-8")
+    return {v.code for v in check(spec, parse_pipeline(path))}
+
+
+def test_connection_params_are_contract(tmp_path: Path) -> None:
+    """keyName / requestFlags / 连接别名必须比对。
+
+    这些字段原来根本不进设计文档，于是模型丢掉它们也能判满分——
+    实测一条 30 列的流水线丢了 14 个键值，报告写着 grounding=1.0。
+    """
+    _, text = _spec_and_text(tmp_path)
+
+    no_key = text.replace("              keyName: SURROGATE_KEY\n", "", 1)
+    assert "S_EXTRACT_PARAMS" in _codes_after(tmp_path, no_key)
+
+    no_flag = text.replace("              requestFlags:\n                includeDeleted: false\n", "", 1)
+    assert "S_EXTRACT_PARAMS" in _codes_after(tmp_path, no_flag)
+
+
+def test_wrong_load_connector_is_caught(tmp_path: Path) -> None:
+    """JDBC 目标写成 COS 会被判出来。
+
+    这是真实发生过的错误：模型把 `jdbc`/`demo-db2` 写成 `cos`/`demo-cos`，
+    而当时的校验器只核对"凭证名在允许集合里"，cos 恰好在集合里，于是放行。
+    """
+    _, text = _spec_and_text(tmp_path)
+    broken = text.replace("            connector: jdbc\n", "            connector: cos\n", 1)
+    assert "S_LOAD_PARAMS" in _codes_after(tmp_path, broken)
+
+
+def test_missing_whole_load_is_caught(tmp_path: Path) -> None:
+    """整段 load 消失不能算通过。
+
+    原来的实现是 `if j.load is None: continue`，等于"没有写入就不检查"。
+    模型删掉 JDBC 那段连接，报告仍然是 grounding=1.0。
+    """
+    _, text = _spec_and_text(tmp_path)
+    lines = text.splitlines()
+    start = next(i for i, line in enumerate(lines) if "jobType: datamart-self-serve" in line)
+    load_at = next(i for i in range(start + 1, len(lines)) if lines[i].strip() == "load:")
+    setups_at = next(i for i in range(load_at + 1, len(lines)) if lines[i].strip().startswith("setups:"))
+    broken = "\n".join(lines[:load_at] + lines[setups_at:]) + "\n"
+    assert "S_LOAD_MISSING" in _codes_after(tmp_path, broken)
+
+
+def test_nullable_and_precision_are_contract(tmp_path: Path) -> None:
+    """可空性和精度也是契约。
+
+    模型把 `nullAble` 写成 `nullable`，解析器只认前者，字段被静默丢弃，
+    而校验器当时只比列名和类型，判了通过。
+    """
+    _, text = _spec_and_text(tmp_path)
+
+    bad_null = text.replace("            nullAble: true\n", "            nullAble: false\n", 1)
+    assert "S_COL_NULLABLE" in _codes_after(tmp_path, bad_null)
+
+    no_args = text.replace(
+        "            dataTypeArgs:\n              precision: 18\n              scale: 2\n", "", 1
+    )
+    assert "S_COL_PRECISION" in _codes_after(tmp_path, no_args)
+
+
+def test_job_size_is_contract(tmp_path: Path) -> None:
+    """setups.size 写错不报错，但会改变 Spark 分片和成本。"""
+    _, text = _spec_and_text(tmp_path)
+    broken = text.replace("      setups:\n        size: L", "      setups:\n        size: XL", 1)
+    assert "S_SIZE" in _codes_after(tmp_path, broken)

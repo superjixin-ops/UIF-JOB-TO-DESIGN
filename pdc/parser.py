@@ -60,6 +60,7 @@ def _extract(raw: dict, index: int = 0) -> ExtractSpec:
     conns = raw.get("connections") or [{}]
     conn = conns[0]
     alias = raw.get("alias") or raw.get("templateSource") or f"UNNAMED_EXTRACT_{index}"
+    flags = conn.get("requestFlags") or {}
     return ExtractSpec(
         alias=str(alias),
         connector=str(conn.get("connector", "unknown")),
@@ -67,6 +68,11 @@ def _extract(raw: dict, index: int = 0) -> ExtractSpec:
         query=str(conn.get("query", "")),
         main_df=bool(raw.get("main_df", False)),
         natural_key=tuple(str(k) for k in (conn.get("naturalKey") or ())),
+        extract_type=str(raw.get("extractType", "default")),
+        conn_alias=str(conn.get("alias", "")),
+        key_name=str(conn.get("keyName", "")),
+        flags=tuple((str(k), v) for k, v in flags.items()) if isinstance(flags, dict) else (),
+        template_source=str(raw.get("templateSource", "")),
     )
 
 
@@ -110,6 +116,7 @@ def _load(raw: dict | None) -> LoadSpec | None:
             mode=str(c.get("mode", "")),
             partitions=c.get("numPartitions"),
             partition_by=tuple(str(x) for x in (c.get("partitionBy") or ())),
+            load_object=str(c.get("loadObject", "")),
         )
         for c in conns
         if c.get("query")
@@ -123,6 +130,10 @@ def _load(raw: dict | None) -> LoadSpec | None:
         schema=_columns(raw.get("schema")),
         partition_by=tuple(str(p) for p in (conn.get("partitionBy") or ())),
         objects=objects,
+        credentials=str(conn.get("credentials", "")),
+        conn_alias=str(conn.get("alias", "")),
+        table_space=str(conn.get("tableSpace", "")),
+        flip_alias=bool(conn.get("flipAlias", False)),
     )
 
 

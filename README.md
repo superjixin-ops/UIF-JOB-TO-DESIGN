@@ -8,8 +8,8 @@
 |---|---|
 | 仓库 | [superjixin-ops/UIF-JOB-TO-DESIGN](https://github.com/superjixin-ops/UIF-JOB-TO-DESIGN) |
 | 在线演示 | `https://3eea34987613e6.app.lhr.life`（临时隧道，token `demo-token`） |
-| 规模 | **190 测试** · 37 模块 · 7,417 行主代码 + 2,413 行测试 |
-| 效果 | 设计文档 **4 小时 → 13 秒**；反向生成 **留一法 4/4 通过**，平均 1.6 轮、约 $0.015 一条 |
+| 规模 | **195 测试** · 37 模块 · 7,723 行主代码 + 2,495 行测试 |
+| 效果 | 设计文档 **4 小时 → 13 秒**；反向生成 **留一法 4/4 通过**，平均 2 轮、约 $0.02 一条；143 个键值与源文件零差异 |
 | 技术栈 | Python 3.12 · FastAPI · asyncio · SQLite · LangGraph · MCP |
 
 ---
@@ -64,11 +64,12 @@ uv run pdc parse out/fact-order-fulfillment.yaml
 **留一法评测**（生成 A 时示例里只有 B/C/D，防止抄答案）：
 
 ```
-[PASS] dim-customer-segment    1 轮   56k
-[PASS] dim-product-family      1 轮   14k
-[PASS] fact-inventory-snapshot 1 轮   30k
-[PASS] fact-order-fulfillment  3 轮  155k
-pass_rate 1.00 · avg_rounds 1.50 · exact_match 0.00（没有抄）
+[PASS] dim-customer-segment    2 轮   81k
+[PASS] dim-product-family      2 轮   23k
+[PASS] fact-inventory-snapshot 2 轮   48k
+[PASS] fact-order-fulfillment  2 轮  119k
+pass_rate 1.00 · avg_rounds 2.00 · exact_match 0.00（没有抄）
+连接级键值：源 143 个，缺/不同 0 个
 ```
 
 完整记录见 [`../设计转YAML-Agent-幻觉与测试治理.md`](../设计转YAML-Agent-幻觉与测试治理.md)。
@@ -147,7 +148,7 @@ pdc/
   ui/index.html            单文件控制台
 eval/      四指标评测 + 审计 golden set + 反向生成留一法评测
 rag/       检索评测、α 扫描、A/B、引用分析
-tests/     190 个用例
+tests/     195 个用例
 loadtest/  并发压测
 samples/   虚构样例数据（可公开）
 scripts/   本地启动 + 隧道

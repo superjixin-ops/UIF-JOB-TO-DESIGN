@@ -76,8 +76,11 @@ def build_overview(facts: PipelineFacts) -> Sheet:
 def build_source_inventory(facts: PipelineFacts) -> Sheet:
     s = Sheet(
         "Source Inventory",
-        ["#", "Job", "Alias", "Connector", "Credentials", "Query / Path", "main_df", "Natural key"],
-        widths=[5, 20, 34, 12, 22, 56, 9, 48],
+        [
+            "#", "Job", "Alias", "Connector", "Credentials", "Query / Path", "main_df",
+            "Natural key", "Type", "Conn Alias", "Key Name", "Flags",
+        ],
+        widths=[5, 20, 34, 12, 22, 56, 9, 40, 14, 18, 14, 34],
     )
     n = 0
     for j in facts.jobs:
@@ -92,6 +95,10 @@ def build_source_inventory(facts: PipelineFacts) -> Sheet:
                 e.query,
                 "Y" if e.main_df else "N",
                 ", ".join(e.natural_key) if e.natural_key else "-",
+                e.extract_type,
+                e.conn_alias or "-",
+                e.key_name or "-",
+                json.dumps(dict(e.flags), ensure_ascii=False) if e.flags else "-",
             )
     return s
 
@@ -160,8 +167,12 @@ def build_load_targets(facts: PipelineFacts) -> Sheet:
     """
     s = Sheet(
         "Load Targets",
-        ["#", "Job", "Object", "Target Path / Table", "Mode", "Partitions", "Partition By", "Schema"],
-        widths=[5, 20, 40, 62, 12, 12, 20, 10],
+        [
+            "#", "Job", "Object", "Metadata Name", "Target Path / Table", "Mode",
+            "Partitions", "Partition By", "Schema", "Conn Alias", "Table Space",
+            "Connector", "Credentials", "Flip Alias",
+        ],
+        widths=[5, 20, 34, 34, 56, 12, 12, 20, 10, 18, 16, 12, 18, 10],
     )
     n = 0
     for j in facts.jobs:
@@ -170,10 +181,15 @@ def build_load_targets(facts: PipelineFacts) -> Sheet:
         objects = j.load.objects or ()
         for o in objects:
             n += 1
-            s.add(n, j.job_type, o.object_name, o.query, o.mode,
+            s.add(n, j.job_type, o.load_object or "-", j.load.object_name or "-", o.query, o.mode,
                   o.partitions if o.partitions is not None else "-",
                   ", ".join(o.partition_by) or "-",
-                  "declared" if j.load.schema else "inferred")
+                  "declared" if j.load.schema else "inferred",
+                  j.load.conn_alias or "-",
+                  j.load.table_space or "-",
+                  j.load.connector or "-",
+                  j.load.credentials or "-",
+                  "Y" if j.load.flip_alias else "N")
     if n == 0:
         s.add("-", "-", "(无 load)", "-", "-", "-", "-", "-")
     return s

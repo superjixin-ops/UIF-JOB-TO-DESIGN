@@ -85,6 +85,22 @@ def check(spec: DesignSpec, facts: PipelineFacts) -> list[SpecViolation]:
             )
         )
 
+    # ---------- 容量档位 ----------
+    # 这一项原来完全没比。模型把 M 写成 T，校验器一声不吭——
+    # size 决定 Spark 分片和成本，写错不报错，但会多花钱或跑不动。
+    for job, size in spec.job_sizes:
+        j = facts.job(job)
+        if j is None:
+            continue
+        if j.size != size:
+            out.append(
+                SpecViolation(
+                    "S_SIZE",
+                    f"{job}: setups.size 是 {j.size!r}，文档要求 {size!r}",
+                    where=job,
+                )
+            )
+
     # ---------- 列契约 ----------
     for job in common:
         want = {c.name: c for c in spec.columns_of(job)}
@@ -100,6 +116,9 @@ def check(spec: DesignSpec, facts: PipelineFacts) -> list[SpecViolation]:
                 )
             )
             continue
+        job_facts = facts.job(job)
+        yaml_cols = {c.name: c for c in job_facts.load.schema} if job_facts and job_facts.load else {}
+
         for name, col in want.items():
             if name not in got:
                 out.append(
@@ -115,6 +134,32 @@ def check(spec: DesignSpec, facts: PipelineFacts) -> list[SpecViolation]:
                     SpecViolation(
                         "S_COL_TYPE",
                         f"{job}.{name}: 类型是 {got[name]}，文档要求 {col.data_type}",
+                        where=job,
+                    )
+                )
+            # nullable 和精度也是契约。之前只比名字和类型，
+            # 模型把 nullAble: false 写成 nullable: false，字段被解析器忽略，
+            # 校验器却判了通过——**YAML 能解析，但可空性变了**。
+            ycol = yaml_cols.get(name)
+            if ycol is not None and bool(ycol.nullable) != bool(col.nullable):
+                out.append(
+                    SpecViolation(
+                        "S_COL_NULLABLE",
+                        f"{job}.{name}: nullAble 是 {ycol.nullable}，文档要求 {col.nullable}",
+                        where=job,
+                    )
+                )
+            if (
+                ycol is not None
+                and col.precision_num is not None
+                and (ycol.precision, ycol.scale) != (col.precision_num, col.scale_num)
+            ):
+                out.append(
+                    SpecViolation(
+                        "S_COL_PRECISION",
+                        f"{job}.{name}: dataTypeArgs 是 "
+                        f"({ycol.precision},{ycol.scale})，文档要求 "
+                        f"({col.precision_num},{col.scale_num})",
                         where=job,
                     )
                 )
@@ -152,6 +197,36 @@ def check(spec: DesignSpec, facts: PipelineFacts) -> list[SpecViolation]:
         out.append(
             SpecViolation("S_EXTRACT_EXTRA", f"{job}: YAML 多出数据源 {alias}，文档里没有", where=job)
         )
+
+    # 连接级参数：这些字段原来根本不进文档，所以产物丢掉它们也能判满分。
+    # 实测一条 30 列的流水线丢了 14 个键值（conn alias / keyName / requestFlags），
+    # 报告里却写着 grounding=1.0——**校验器看不见文档没有的东西**。
+    yaml_extracts = {
+        (j.job_type, e.alias): e for j in facts.jobs for e in j.extracts
+    }
+    for want in spec.extracts:
+        got = yaml_extracts.get((want.job, want.alias))
+        if got is None:
+            continue  # S_EXTRACT_MISSING 已报
+        wrong: list[str] = []
+        if want.extract_type and want.extract_type != got.extract_type:
+            wrong.append(f"extractType: {got.extract_type!r} != {want.extract_type!r}")
+        if want.conn_alias and want.conn_alias != got.conn_alias:
+            wrong.append(f"connections[].alias: {got.conn_alias!r} != {want.conn_alias!r}")
+        if want.key_name and want.key_name != got.key_name:
+            wrong.append(f"connections[].keyName: {got.key_name!r} != {want.key_name!r}")
+        if want.flags and _norm_param(dict(want.flags)) != _norm_param(dict(got.flags)):
+            wrong.append(
+                f"connections[].requestFlags: {dict(got.flags)} != {dict(want.flags)}"
+            )
+        if wrong:
+            out.append(
+                SpecViolation(
+                    "S_EXTRACT_PARAMS",
+                    f"{want.job}.{want.alias}: " + "；".join(wrong),
+                    where=want.job,
+                )
+            )
 
     # main_df 有且只有一个，且必须是文档指的那个
     for job in common:
@@ -233,17 +308,44 @@ def check(spec: DesignSpec, facts: PipelineFacts) -> list[SpecViolation]:
     # 不按单行比——否则"写两张表"的合法情况会被判成写错目标。
     for job in common:
         j = facts.job(job)
-        if j is None or j.load is None:
+        if j is None:
             continue
-        want = {load.object_name for load in spec.loads if load.job == job and load.object_name}
-        got = {j.load.object_name} | {o.object_name for o in j.load.objects}
-        got = {g for g in got if g}
-        if want and want != got:
+        if j.load is None:
+            # 文档里有 load，YAML 里没有 —— 整段写入消失了。
+            # 这个分支原来是 `continue`，于是"删掉整段 load"能被判通过：
+            # 已经踩过一次，模型把 JDBC 那段连接删了，报告仍然是 grounding=1.0。
+            if any(x.job == job for x in spec.loads):
+                out.append(
+                    SpecViolation(
+                        "S_LOAD_MISSING",
+                        f"{job}: 文档要求写 {sorted({x.object_name or x.query for x in spec.loads if x.job == job})}，"
+                        "YAML 里整段 load 缺失",
+                        where=job,
+                    )
+                )
+            continue
+        # loadObject 和 metadata.name 是两个键，必须分开比。
+        # 混成一列时模型只能猜，实测它把 query 写成了 loadObject，
+        # 而校验器因为"目标名看着对"放过了——**错的是文档，不是模型**。
+        want_obj = {x.object_name for x in spec.loads if x.job == job and x.object_name}
+        got_obj = {o.load_object for o in j.load.objects if o.load_object}
+        if want_obj and want_obj != got_obj:
             out.append(
                 SpecViolation(
                     "S_TARGET",
-                    f"{job}: load.connections[].loadObject 应为 {sorted(want)}，"
-                    f"实际 {sorted(got) or '缺失'}",
+                    f"{job}: load.connections[].loadObject 应为 {sorted(want_obj)}，"
+                    f"实际 {sorted(got_obj) or '缺失'}",
+                    where=job,
+                )
+            )
+        want_meta = {x.metadata_name for x in spec.loads if x.job == job and x.metadata_name}
+        got_meta = {j.load.object_name} - {""}
+        if want_meta and want_meta != got_meta:
+            out.append(
+                SpecViolation(
+                    "S_METADATA_NAME",
+                    f"{job}: load.metadata.name 应为 {sorted(want_meta)}，"
+                    f"实际 {sorted(got_meta) or '缺失'}",
                     where=job,
                 )
             )
@@ -257,6 +359,41 @@ def check(spec: DesignSpec, facts: PipelineFacts) -> list[SpecViolation]:
                     where=job,
                 )
             )
+        # 连接级：并行度、别名、表空间。写错并行度不一定报错，但会改变写入行为。
+        for spec_load in [x for x in spec.loads if x.job == job]:
+            wrong: list[str] = []
+            if spec_load.partitions is not None and spec_load.partitions != j.load.partitions:
+                wrong.append(
+                    f"connections[].numPartitions: {j.load.partitions} != {spec_load.partitions}"
+                )
+            if spec_load.conn_alias and spec_load.conn_alias != j.load.conn_alias:
+                wrong.append(
+                    f"connections[].alias: {j.load.conn_alias!r} != {spec_load.conn_alias!r}"
+                )
+            if spec_load.table_space and spec_load.table_space != j.load.table_space:
+                wrong.append(
+                    f"connections[].tableSpace: {j.load.table_space!r} != {spec_load.table_space!r}"
+                )
+            if spec_load.connector and spec_load.connector != j.load.connector:
+                wrong.append(
+                    f"connections[].connector: {j.load.connector!r} != {spec_load.connector!r}"
+                )
+            if spec_load.credentials and spec_load.credentials != j.load.credentials:
+                wrong.append(
+                    f"connections[].credentials: {j.load.credentials!r} != "
+                    f"{spec_load.credentials!r}（写错 connector 会写到别的系统）"
+                )
+            if spec_load.flip_alias != j.load.flip_alias:
+                wrong.append(
+                    f"connections[].flipAlias: {j.load.flip_alias} != {spec_load.flip_alias}"
+                )
+            if wrong:
+                out.append(
+                    SpecViolation(
+                        "S_LOAD_PARAMS", f"{job}: " + "；".join(wrong), where=job
+                    )
+                )
+
         want_pby = {tuple(load.partition_by) for load in spec.loads if load.job == job}
         if want_pby and tuple(j.load.partition_by) not in want_pby:
             out.append(

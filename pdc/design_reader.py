@@ -46,6 +46,8 @@ class SpecColumn:
     precision: str = "-"
     nullable: bool = True
     partition: bool = False
+    precision_num: int | None = None
+    scale_num: int | None = None
 
     def signature(self) -> tuple:
         """比对用的签名：只含语义，不含展示格式。"""
@@ -61,6 +63,10 @@ class SpecExtract:
     query: str
     main_df: bool = False
     natural_key: tuple[str, ...] = ()
+    extract_type: str = "default"
+    conn_alias: str = ""
+    key_name: str = ""
+    flags: tuple[tuple[str, object], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -81,9 +87,15 @@ class SpecLoad:
     job: str
     object_name: str
     query: str
+    metadata_name: str = ""
     mode: str = ""
     partitions: int | None = None
     partition_by: tuple[str, ...] = ()
+    conn_alias: str = ""
+    table_space: str = ""
+    connector: str = ""
+    credentials: str = ""
+    flip_alias: bool = False
     columns: tuple[SpecColumn, ...] = ()
     schema_declared: bool = True
 
@@ -95,6 +107,7 @@ class DesignSpec:
     owner: str = ""
     sizing: str = ""
     jobs: tuple[str, ...] = ()
+    job_sizes: tuple[tuple[str, str], ...] = ()
     extracts: tuple[SpecExtract, ...] = ()
     transforms: tuple[SpecTransform, ...] = ()
     loads: tuple[SpecLoad, ...] = ()
@@ -132,12 +145,24 @@ class DesignSpec:
             if exs:
                 lines.append("extract:")
                 for e in exs:
-                    nk = f" naturalKey={list(e.natural_key)}" if e.natural_key else ""
-                    lines.append(
-                        f"  - alias={e.alias} main_df={str(e.main_df).lower()} "
-                        f"connector={e.connector} credentials={e.credentials} "
-                        f"query={e.query}{nk}"
-                    )
+                    parts = [
+                        f"alias={e.alias}",
+                        f"main_df={str(e.main_df).lower()}",
+                        f"connector={e.connector}",
+                        f"credentials={e.credentials}",
+                        f"query={e.query}",
+                    ]
+                    if e.extract_type and e.extract_type != "default":
+                        parts.append(f"extractType={e.extract_type}")
+                    if e.conn_alias:
+                        parts.append(f"connections.alias={e.conn_alias}")
+                    if e.key_name:
+                        parts.append(f"keyName={e.key_name}")
+                    if e.natural_key:
+                        parts.append(f"naturalKey={list(e.natural_key)}")
+                    if e.flags:
+                        parts.append(f"requestFlags={json.dumps(dict(e.flags), ensure_ascii=False)}")
+                    lines.append("  - " + " ".join(parts))
 
             txs = [t for t in self.transforms if t.job == job]
             if txs:
@@ -154,18 +179,49 @@ class DesignSpec:
 
             for load in [x for x in self.loads if x.job == job]:
                 cols = "" if load.schema_declared else "（文档未声明 schema，列由 connector 推断）"
-                lines.append(
-                    f"load: object={load.object_name} query={load.query} "
-                    f"mode={load.mode or '-'} partitions={load.partitions if load.partitions is not None else '-'} "
-                    f"partition_by={list(load.partition_by)}{cols}"
-                )
+                # 用缩进块 + JSON 描述连接，而不是一行 key=value。
+                #
+                # 写成一行 `load: object=... query=... connector=...` 时，
+                # 模型会把连接参数直接摊在 load 下面（load.connector），
+                # 而解析器只读 load.connections[0].connector —— 整段写入静默消失。
+                # **提示词的形状会变成产物的形状。**
+                conn: dict = {"query": load.query}
+                if load.object_name:
+                    conn["loadObject"] = load.object_name
+                if load.mode:
+                    conn["mode"] = load.mode
+                if load.partitions is not None:
+                    conn["numPartitions"] = load.partitions
+                if load.partition_by:
+                    conn["partitionBy"] = list(load.partition_by)
+                if load.connector:
+                    conn["connector"] = load.connector
+                if load.credentials:
+                    conn["credentials"] = load.credentials
+                if load.conn_alias:
+                    conn["alias"] = load.conn_alias
+                if load.table_space:
+                    conn["tableSpace"] = load.table_space
+                if load.flip_alias:
+                    conn["flipAlias"] = True
+                lines.append("load:")
+                if load.metadata_name:
+                    lines.append(f"  metadata.name: {load.metadata_name}")
+                lines.append(f"  connections[0]: {json.dumps(conn, ensure_ascii=False)}")
+                lines.append(f"  schema: {len(load.columns)} 列{cols}")
                 if load.schema_declared:
-                    lines.append("  schema:")
                     for c in load.columns:
-                        prec = "" if c.precision in ("-", "", None) else f" precision={c.precision}"
+                        # 用 YAML 真实键名 nullAble / dataTypeArgs。
+                        # 写成 nullable，模型就照抄成 nullable，而解析器只认 nullAble，
+                        # 字段静默丢失——同一个坑在 partitionBy 上已经踩过一次。
+                        args = ""
+                        if c.precision_num is not None:
+                            scale = f", scale: {c.scale_num}" if c.scale_num is not None else ""
+                            args = f" dataTypeArgs={{precision: {c.precision_num}{scale}}}"
                         lines.append(
-                            f"    - {c.name} {c.data_type}{prec} "
-                            f"nullable={str(c.nullable).lower()} partition={str(c.partition).lower()}"
+                            f"    - columnName: {c.name} dataType: {c.data_type}{args} "
+                            f"nullAble: {str(c.nullable).lower()} "
+                            f"partition: {str(c.partition).lower()}"
                         )
             lines.append("")
         if self.warnings:
@@ -176,6 +232,25 @@ class DesignSpec:
 
 def _norm(value: object) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip().lower()
+
+
+def _split_precision(text: str) -> tuple[int | None, int | None]:
+    """把 "18,2" 拆回 precision/scale。解析不了返回 (None, None)，不猜。"""
+    if not text or text == "-":
+        return None, None
+    parts = [x.strip() for x in text.split(",")]
+    try:
+        p = int(parts[0])
+        s = int(parts[1]) if len(parts) > 1 else None
+        return p, s
+    except (ValueError, IndexError):
+        return None, None
+
+
+def _dash(value: object) -> str:
+    """表里用 "-" 表示空。空和真的横线要分开，否则会把 "-" 当字段值写回 YAML。"""
+    text = str(value or "").strip()
+    return "" if text in ("", "-") else text
 
 
 def _truthy(value: object) -> bool:
@@ -262,11 +337,15 @@ def read_design(path: str | Path) -> DesignSpec:
 
     sizing = overview.get("sizing", "")
     jobs: list[str] = []
+    sizes: list[tuple[str, str]] = []
     for part in sizing.split("/"):
         if ":" in part:
-            jt = part.split(":", 1)[0].strip()
+            jt, sz = part.split(":", 1)
+            jt, sz = jt.strip(), sz.strip()
             if jt:
                 jobs.append(jt)
+                if sz:
+                    sizes.append((jt, sz))
     if not jobs:
         warnings.append("Overview 缺 Sizing，job 顺序改从 Source Inventory 推断")
 
@@ -288,6 +367,10 @@ def read_design(path: str | Path) -> DesignSpec:
             c_query = _pick(idx, "Query / Path", "Query")
             c_main = _pick(idx, "main_df")
             c_nk = _pick(idx, "Natural key")
+            c_etype = _pick(idx, "Type")
+            c_calias = _pick(idx, "Conn Alias")
+            c_key = _pick(idx, "Key Name")
+            c_flags = _pick(idx, "Flags")
             if c_job is None or c_alias is None:
                 raise SpecReadError("Source Inventory 缺 Job / Alias 列，表结构不对")
             for row in rows[1:]:
@@ -300,6 +383,17 @@ def read_design(path: str | Path) -> DesignSpec:
                 natural_key = tuple(
                     x.strip() for x in nk_raw.split(",") if x.strip() and x.strip() != "-"
                 )
+                flags_raw = str(_cell(row, c_flags)).strip()
+                flags: tuple[tuple[str, object], ...] = ()
+                if flags_raw and flags_raw != "-":
+                    try:
+                        loaded_flags = json.loads(flags_raw)
+                        if isinstance(loaded_flags, dict):
+                            flags = tuple(loaded_flags.items())
+                        else:
+                            warnings.append(f"{alias} 的 Flags 不是对象，已忽略")
+                    except json.JSONDecodeError:
+                        warnings.append(f"{alias} 的 Flags 不是合法 JSON，已忽略")
                 extracts.append(
                     SpecExtract(
                         job=str(_cell(row, c_job)).strip(),
@@ -309,6 +403,10 @@ def read_design(path: str | Path) -> DesignSpec:
                         query=str(_cell(row, c_query)).strip(),
                         main_df=_truthy(_cell(row, c_main)),
                         natural_key=natural_key,
+                        extract_type=str(_cell(row, c_etype)).strip() or "default",
+                        conn_alias=_dash(_cell(row, c_calias)),
+                        key_name=_dash(_cell(row, c_key)),
+                        flags=flags,
                     )
                 )
             if not jobs:
@@ -377,15 +475,26 @@ def read_design(path: str | Path) -> DesignSpec:
             idx = _header_index(rows[0])
             c_job = _pick(idx, "Job")
             c_obj = _pick(idx, "Object")
+            c_meta = _pick(idx, "Metadata Name")
             c_query = _pick(idx, "Target Path / Table", "Target Path")
             c_mode = _pick(idx, "Mode")
             c_parts = _pick(idx, "Partitions")
             c_pby = _pick(idx, "Partition By")
             c_schema = _pick(idx, "Schema")
+            c_calias = _pick(idx, "Conn Alias")
+            c_ts = _pick(idx, "Table Space")
+            c_conn = _pick(idx, "Connector")
+            c_cred = _pick(idx, "Credentials")
+            c_flip = _pick(idx, "Flip Alias")
             for row in rows[1:]:
                 job = str(_cell(row, c_job)).strip()
                 obj = str(_cell(row, c_obj)).strip()
-                if not job or job == "-" or obj in ("", "-"):
+                query = str(_cell(row, c_query)).strip()
+                # 用 query 作为"这一行是否有效"的判据，不能看 Object：
+                # JDBC 写入没有 loadObject，Object 列是 "-"——
+                # 早先按 Object 跳过，导致整段写入被静默丢掉，
+                # 而校验器因为"文档没要求"也放过了。
+                if not job or job == "-" or query in ("", "-"):
                     continue
                 raw_parts = _cell(row, c_parts)
                 try:
@@ -400,12 +509,20 @@ def read_design(path: str | Path) -> DesignSpec:
                 targets.append(
                     {
                         "job": job,
-                        "object_name": obj,
+                        "object_name": _dash(obj),
+                        "metadata_name": _dash(_cell(row, c_meta)),
                         "query": str(_cell(row, c_query)).strip(),
                         "mode": str(_cell(row, c_mode)).strip(),
                         "partitions": parts,
                         "partition_by": pby,
                         "declared": _norm(_cell(row, c_schema)) == "declared",
+                        "conn_alias": _dash(_cell(row, c_calias)),
+                        "table_space": _dash(_cell(row, c_ts)),
+                        "connector": _dash(_cell(row, c_conn)),
+                        "credentials": _dash(_cell(row, c_cred)),
+                        "flip_alias": _truthy(_cell(row, c_flip))
+                        if c_flip is not None
+                        else False,
                     }
                 )
 
@@ -433,13 +550,17 @@ def read_design(path: str | Path) -> DesignSpec:
             cname = str(_cell(row, c_name)).strip()
             if not cname or cname == "-" or cname.startswith("(该 job"):
                 continue
+            prec_raw = str(_cell(row, c_prec)).strip()
+            pnum, snum = _split_precision(prec_raw)
             cols.append(
                 SpecColumn(
                     name=cname,
                     data_type=str(_cell(row, c_type)).strip(),
-                    precision=str(_cell(row, c_prec)).strip() or "-",
+                    precision=prec_raw or "-",
                     nullable=_truthy(_cell(row, c_null)),
                     partition=_truthy(_cell(row, c_part)) if c_part is not None else False,
+                    precision_num=pnum,
+                    scale_num=snum,
                 )
             )
         per_job_columns[job] = tuple(cols)
@@ -452,10 +573,16 @@ def read_design(path: str | Path) -> DesignSpec:
             SpecLoad(
                 job=t["job"],
                 object_name=t["object_name"],
+                metadata_name=t.get("metadata_name", ""),
                 query=t["query"],
                 mode=t["mode"],
                 partitions=t["partitions"],
                 partition_by=t["partition_by"],
+                conn_alias=t.get("conn_alias", ""),
+                table_space=t.get("table_space", ""),
+                connector=t.get("connector", ""),
+                credentials=t.get("credentials", ""),
+                flip_alias=bool(t.get("flip_alias", False)),
                 columns=cols,
                 schema_declared=bool(t["declared"] and cols),
             )
@@ -478,6 +605,7 @@ def read_design(path: str | Path) -> DesignSpec:
         owner=overview.get("owner", ""),
         sizing=sizing,
         jobs=tuple(jobs),
+        job_sizes=tuple(sizes),
         extracts=tuple(extracts),
         transforms=tuple(transforms),
         loads=tuple(loads),
