@@ -8,6 +8,20 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # 真的起一个带 pgvector 的 Postgres：否则"适配器写完了"只是自我声明。
+    services:
+      pg:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: pdc
+          POSTGRES_DB: pdc
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d pdc"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - uses: actions/checkout@v4
 
@@ -26,6 +40,8 @@ jobs:
         run: uv run ruff check pdc
 
       - name: Test
+        env:
+          PDC_TEST_PG_DSN: postgresql://postgres:pdc@localhost:5433/pdc
         run: uv run pytest -q
 
       # 备份没演练过等于没有备份。这一步在 CI 里真的走一遍
