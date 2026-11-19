@@ -61,3 +61,21 @@ def test_skills_do_not_collide_on_id():
     skill_ids = {c["id"].split("#")[0] for c in index.chunks if c["id"].startswith("skill-")}
     # 10 个 skill 如果都用 "SKILL" 做 id，这里会变成 1
     assert len(skill_ids) >= 1
+
+
+def test_sample_eval_labels_are_valid() -> None:
+    """样例语料评测的标注必须指向真实 chunk。
+
+    这条测试的价值：标注是手写的，改文档标题就会让 chunk id 失效，
+    而评测脚本只在运行时才报错——放进 CI 就能立刻发现。
+    """
+    from pdc.rag import RuleIndex
+    from rag.eval_sample import CASES
+
+    ids = {c["id"] for c in RuleIndex().chunks}
+    missing = [gold for _, gold in CASES if gold not in ids]
+    assert missing == [], f"标注指向了不存在的 chunk: {missing}"
+
+    queries = [q for q, _ in CASES]
+    assert len(queries) == len(set(queries)), "query 不能重复"
+    assert len(CASES) >= 10
