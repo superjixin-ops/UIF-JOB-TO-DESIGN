@@ -44,6 +44,15 @@ jobs:
           PDC_TEST_PG_DSN: postgresql://postgres:pdc@localhost:5433/pdc
         run: uv run pytest -q
 
+      # 只跑 pytest 不够：用例可能被 skip 掉，而 skip 也是绿。
+      # 这一步要求 pgvector 集成用例必须真的 passed。
+      - name: Verify pgvector test actually ran
+        env:
+          PDC_TEST_PG_DSN: postgresql://postgres:pdc@localhost:5433/pdc
+        run: |
+          uv run pytest tests/test_langchain_pg.py::test_pg_roundtrip -q | tee /tmp/pg.txt
+          grep -q "1 passed" /tmp/pg.txt
+
       # 备份没演练过等于没有备份。这一步在 CI 里真的走一遍
       # 创建 -> 校验 -> 恢复，而不是只跑单测。
       - name: Backup drill
