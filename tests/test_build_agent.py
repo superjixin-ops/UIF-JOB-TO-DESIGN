@@ -581,3 +581,50 @@ def test_secret_regex_only_flags_realistic_keys() -> None:
     long_key = "sk-" + "a" * 40
     leaked = BASE.replace("name: dim-tiny", f"name: dim-tiny\n  note: {long_key}")
     assert "E_SECRET" in {i.code for i in validate_text(leaked)}
+
+
+# ---------------------------------------------------------------------------
+# 7. 示例截断必须保住 load 段
+# ---------------------------------------------------------------------------
+def test_excerpt_keeps_load_block_when_truncating() -> None:
+    """长文件的 load 段不能被截断切掉。
+
+    真实事故：600 行的示例，load 在第 400 行。只给前 220 行，
+    模型永远看不到 schema 长什么样，生成时整段省略 schema——
+    一次 12×3 的 A/B 因此被污染。
+    """
+    from pdc.yamlgen import _excerpt
+
+    lines = ["# head"] * 400 + [
+        "      load:",
+        "        metadata:",
+        "          name: DIM_X",
+        "        schema:",
+        "          - columnName: ID",
+        "            dataType: StringType",
+        "      setups:",
+        "        size: S",
+    ]
+    content, mode = _excerpt(lines, 220)
+    assert mode == "head+load"
+    assert "columnName: ID" in content
+    assert "dataType: StringType" in content
+    assert "setups:" not in content  # 只保留 load 段，不越界
+    assert len(content.splitlines()) <= 221
+
+
+def test_excerpt_returns_full_when_short() -> None:
+    from pdc.yamlgen import _excerpt
+
+    lines = ["a: 1", "b: 2"]
+    content, mode = _excerpt(lines, 220)
+    assert mode == "full"
+    assert content == "a: 1\nb: 2"
+
+
+def test_excerpt_without_load_falls_back_to_head() -> None:
+    from pdc.yamlgen import _excerpt
+
+    content, mode = _excerpt([f"line{i}" for i in range(300)], 220)
+    assert mode == "head"
+    assert len(content.splitlines()) <= 220

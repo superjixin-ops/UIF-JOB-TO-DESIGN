@@ -229,11 +229,13 @@ class BuildTools:
                 raise FileNotFoundError(f"没有这个示例: {name}")
             p = matches[0]
         lines = p.read_text(encoding="utf-8").splitlines()
+        content, kept = _excerpt(lines, max_lines)
         return {
             "name": str(p.relative_to(self.examples_dir)),
             "total_lines": len(lines),
             "truncated": len(lines) > max_lines,
-            "content": "\n".join(lines[:max_lines]),
+            "content": content,
+            "kept": kept,
         }
 
     def write_yaml(self, text: str) -> dict:
@@ -385,6 +387,52 @@ def _slim_args(name: str, args: dict) -> dict:
                 ),
             }
     return args
+
+
+def _excerpt(lines: list[str], max_lines: int) -> tuple[str, str]:
+    """截断时要保住 `load:` 段。
+
+    真实教训：示例文件平均 600 行，`load:` 常在 220 行之后。
+    直接取前 220 行，模型永远看不到 schema 长什么样，
+    于是生成时**整段省略 schema**——而这是最关键的输出契约。
+
+    一次 12×3 的 A/B 因此被污染：结构近邻组抽到的都是长文件，
+    看起来"结构检索更差"，实际是"截断把 load 切掉了"。
+
+    规则：不超长就全给；超长就 head + load 段，load 段必须完整。
+    """
+    if len(lines) <= max_lines:
+        return "\n".join(lines), "full"
+
+    load_at = next((i for i, line in enumerate(lines) if line.strip() == "load:"), None)
+    if load_at is None:
+        return "\n".join(lines[:max_lines]), "head"
+
+    indent = len(lines[load_at]) - len(lines[load_at].lstrip())
+    end = len(lines)
+    for i in range(load_at + 1, len(lines)):
+        stripped = lines[i].strip()
+        if not stripped:
+            continue
+        cur = len(lines[i]) - len(lines[i].lstrip())
+        if cur <= indent and not stripped.startswith("#"):
+            end = i
+            break
+    block = lines[load_at:end]
+
+    sep = ["", "# ...（中间省略，已保留 load 段）...", ""]
+    if len(block) + len(sep) >= max_lines:
+        # load 段自己就超长：优先给 load，头部只留 20 行上下文
+        head = lines[:20]
+        keep = max_lines - len(head) - len(sep)
+        return "\n".join(head + sep + block[:keep]), "load-first"
+
+    head = lines[: max_lines - len(block) - len(sep)]
+    if load_at <= len(head):
+        return "\n".join(lines[:max_lines]), "head"
+
+    merged = head + sep + block
+    return "\n".join(merged), "head+load"
 
 
 def _issue(code: str, message: str, fix: str = "") -> dict:
