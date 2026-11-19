@@ -9,7 +9,7 @@
 | 仓库 | [superjixin-ops/UIF-JOB-TO-DESIGN](https://github.com/superjixin-ops/UIF-JOB-TO-DESIGN) |
 | 在线演示 | `https://3eea34987613e6.app.lhr.life`（临时隧道，token `demo-token`） |
 | 规模 | **189 测试** · 36 模块 · 9,600+ 行 |
-| 效果 | 单文件设计文档 **4 小时 → 13 秒**；8 条真实流水线四指标全过 |
+| 效果 | 设计文档 **4 小时 → 13 秒**；反向生成 **留一法 4/4 通过**，平均 1.6 轮、约 $0.015 一条 |
 | 技术栈 | Python 3.12 · FastAPI · asyncio · SQLite · LangGraph · MCP |
 
 ---
@@ -60,6 +60,16 @@ uv run pdc parse out/fact-order-fulfillment.yaml
 1. **裁判先行**——`spec_validator`（结构/契约/安全）+ `spec_grounding`（事实对齐）
 2. **硬门禁**——模型调 `finish` 时重新校验，不过就驳回并附错误清单
 3. **卡住换策略**——连续 3 轮同一组错误，强制整篇重写
+
+**留一法评测**（生成 A 时示例里只有 B/C/D，防止抄答案）：
+
+```
+[PASS] dim-customer-segment    1 轮   56k
+[PASS] dim-product-family      1 轮   14k
+[PASS] fact-inventory-snapshot 1 轮   30k
+[PASS] fact-order-fulfillment  3 轮  155k
+pass_rate 1.00 · avg_rounds 1.50 · exact_match 0.00（没有抄）
+```
 
 完整记录见 [`../设计转YAML-Agent-幻觉与测试治理.md`](../设计转YAML-Agent-幻觉与测试治理.md)。
 

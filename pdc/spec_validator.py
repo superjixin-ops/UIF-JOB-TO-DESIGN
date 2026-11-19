@@ -113,10 +113,19 @@ def validate_text(text: str, filename: str = "pipeline.yaml") -> list[Issue]:
 
         extracts = job.get("extract") or []
         main_count = sum(1 for e in extracts if e.get("main_df") is True)
-        if len(extracts) and main_count != 1:
+        if len(extracts) and main_count < 1:
+            # 只要求"至少有一个主数据集"，不要求"只有一个"。
+            #
+            # 原来写的是 != 1，结果样例 fact-inventory-snapshot 直接过不了——
+            # 那条流水线有两个 fact 源（库存快照 + 库存调整）join 在一起，
+            # 两个都是 main_df: true。**是我的规则错了，不是数据错了。**
+            #
+            # 这正是"校验器把自己的假设当规范"的典型：
+            # 一条从三五个样例里总结出来的规律，写进裁判就变成了硬约束。
+            # 现在改成只检查"有没有"，具体哪几个由文档逐项比对（S_MAIN_DF）。
             issues.append(Issue(
-                "E_MAIN_DF", f"job {jt} 有 {main_count} 个 main_df: true",
-                "每个 job 有且只有一个主数据集，其余写 main_df: false 或省略",
+                "E_MAIN_DF", f"job {jt} 有 {len(extracts)} 个 extract，但一个 main_df: true 都没有",
+                "至少把一个主数据集的 main_df 写成 true",
             ))
 
         for e in extracts:

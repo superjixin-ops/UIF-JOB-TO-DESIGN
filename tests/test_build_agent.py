@@ -163,6 +163,25 @@ def test_validator_catches_structural_errors(mutate, expected: str) -> None:
     assert expected in codes(broken), f"应报 {expected}，实际 {codes(broken)}"
 
 
+def test_two_main_df_is_legal() -> None:
+    """一个 job 可以有两个主数据集。
+
+    这条用例对应一次真实误判：校验器写了"只能有一个 main_df"，
+    结果一条真实的库存流水线（快照 + 调整两个 fact 源 join）永远过不了。
+    规则是从三个样例里总结出来的，**我把观察当成了规范**。
+    """
+    two = BASE.replace(
+        "        - extractType: default\n          alias: TINY_SRC",
+        "        - extractType: default\n          alias: EXTRA_SRC\n"
+        "          main_df: true\n          connections:\n"
+        "            - credentials: demo-cos\n              connector: cos\n"
+        "              query: landing/extra.parquet\n"
+        "        - extractType: default\n          alias: TINY_SRC",
+        1,
+    )
+    assert "E_MAIN_DF" not in codes(two)
+
+
 def test_validator_rejects_plaintext_secret() -> None:
     leaked = BASE.replace("spec:\n", "secret: abc123\nspec:\n")
     assert "E_SECRET" in codes(leaked)
