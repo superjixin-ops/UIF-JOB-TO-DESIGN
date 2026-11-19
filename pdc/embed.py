@@ -18,7 +18,7 @@ from typing import Protocol
 
 import numpy as np
 
-DEFAULT_MODEL = "BAAI/bge-small-zh-v1.5"
+DEFAULT_MODEL = os.getenv("PDC_EMBED_MODEL", "BAAI/bge-small-zh-v1.5")
 CACHE_DIR = Path(__file__).resolve().parents[1] / "out" / "rag"
 
 

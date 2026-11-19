@@ -357,6 +357,56 @@ def cmd_build(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_index(args: argparse.Namespace) -> int:
+    from pdc.search import build
+
+    meta = build(
+        args.repo,
+        args.out,
+        backend=args.backend,
+        offline_embed=args.offline,
+        limit=args.limit or None,
+    )
+    print(json.dumps(meta, ensure_ascii=False, indent=2))
+    print(f"\n下一步: uv run pdc search \"订单履约\" --index {args.out}")
+    return 0
+
+
+def cmd_search(args: argparse.Namespace) -> int:
+    from pdc.search import search
+
+    where = {}
+    for item in args.where or []:
+        if "=" in item:
+            k, v = item.split("=", 1)
+            where[k] = v
+    hits = search(args.index, args.query, k=args.top_k, where=where or None, offline_embed=args.offline)
+    if not hits:
+        print("没有命中。")
+        return 0
+    for i, h in enumerate(hits, 1):
+        print(f"{i}. {h.id}  (score {h.score:.3f})")
+        print(f"   {h.metadata.get('path', '')}")
+        if h.metadata.get("chain"):
+            print(f"   {h.metadata['chain']}")
+    return 0
+
+
+def cmd_bench(args: argparse.Namespace) -> int:
+    from pdc.search import bench
+
+    sizes = [int(x) for x in args.sizes.split(",") if x.strip()]
+    out = bench(args.index, sizes, queries=args.queries)
+    print(f"{'n':>8}{'numpy 建':>10}{'sqlite 建':>11}{'numpy p50':>12}{'sqlite p50':>12}{'db MB':>8}")
+    for r in out["rows"]:
+        print(
+            f"{r['n']:>8}{r['numpy_build_s']:>9}s{r['sqlite_build_s']:>10}s"
+            f"{r['numpy_p50_ms']:>11}ms{r['sqlite_p50_ms']:>11}ms{r['db_size_mb']:>8}"
+        )
+    print(f"\n每条查询取 {out['queries']} 次的中位数。")
+    return 0
+
+
 def cmd_audit(args: argparse.Namespace) -> int:
     from pdc.audit import main as audit_main
 
@@ -429,6 +479,29 @@ def main(argv: list[str] | None = None) -> int:
     )
     b.add_argument("--route", choices=["", "cost", "quality", "balanced"], default="")
     b.set_defaults(func=cmd_build)
+
+    ix = sub.add_parser("index", help="建 pipeline 语义索引")
+    ix.add_argument("action", nargs="?", default="build", choices=["build"], help="目前只有 build")
+    ix.add_argument("--repo", default="samples/pipelines")
+    ix.add_argument("--out", default="out/index")
+    ix.add_argument("--backend", choices=["numpy", "sqlite-vec"], default="numpy")
+    ix.add_argument("--limit", type=int, default=0)
+    ix.add_argument("--offline", action="store_true", help="用哈希向量，不下载模型")
+    ix.set_defaults(func=cmd_index)
+
+    se = sub.add_parser("search", help="语义检索 pipeline")
+    se.add_argument("query")
+    se.add_argument("--index", default="out/index")
+    se.add_argument("-k", "--top-k", type=int, default=5)
+    se.add_argument("--where", action="append", help="过滤，例如 --where chain=eid")
+    se.add_argument("--offline", action="store_true")
+    se.set_defaults(func=cmd_search)
+
+    be = sub.add_parser("bench", help="比 numpy 与 sqlite-vec 的构建/查询成本")
+    be.add_argument("--index", default="out/index")
+    be.add_argument("--sizes", default="1000,10000,100000")
+    be.add_argument("--queries", type=int, default=20)
+    be.set_defaults(func=cmd_bench)
 
     e = sub.add_parser("eval", help="跑评测集")
     e.add_argument("--cases", type=int, default=20)

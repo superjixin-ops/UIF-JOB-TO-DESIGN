@@ -328,6 +328,44 @@ tracer 把工具返回值截断成 2,000 字符的字符串，分析脚本按 li
 
 这两个 bug 都只有端到端跑才能暴露，单测覆盖不到。
 
+## 语义检索（可选向量库）
+
+给 5,816 条 pipeline 做语义索引，两个后端可切换：
+
+```bash
+# 建索引（默认 numpy：0 依赖，索引目录可直接拷走）
+uv run pdc index build --repo samples/pipelines --out out/index --backend numpy
+
+# 换 sqlite-vec（单文件、可增量、支持分区过滤）
+uv run pdc index build --repo samples/pipelines --out out/index --backend sqlite-vec
+
+# 查询（中文会自动补英文关键词）
+uv run pdc search "订单履约的流水线" --index out/index -k 5
+uv run pdc search "客户维度" --index out/index --where "chain=eid"
+
+# 两个后端的构建/查询成本对比
+uv run pdc bench --index out/index --sizes 1000,10000,100000
+```
+
+实测（512 维，10 次查询取中位数）：
+
+| n | numpy 建 | sqlite-vec 建 | numpy p50 | sqlite p50 | db 大小 |
+|---|---|---|---|---|---|
+| 1,000 | 0.0s | 0.05s | 0.59ms | 1.06ms | 6.5MB |
+| 10,000 | 0.0s | 0.95s | 8.37ms | 5.68ms | 25MB |
+| 100,000 | 0.06s | 9.58s | 75.1ms | 40.9ms | 227MB |
+
+**结论：两种规模下查询都是几十毫秒，向量库赢 1.8 倍，但构建慢 160 倍。**
+真正的瓶颈不是索引，是 **embedding**：1,000 条真实 pipeline 建卡编码要 5 分钟
+（5,816 条约 30 分钟）。换库不解决这件事。
+
+所以向量库在这里的价值是**持久化 / 增量更新 / 分区过滤**，不是速度。
+默认仍然用 numpy；sqlite-vec 是可选后端。
+
+**已知限制**：卡片是英文（YAML 标识符），`bge-small-zh` 跨语言能力弱。
+中文查询靠一个 24 词的小词表补英文，能命中但不够好。
+正式做法是换多语模型：`PDC_EMBED_MODEL=intfloat/multilingual-e5-small`。
+
 ## 并发与压测
 
 Agent 单次运行 12 秒、7 次模型调用。不做并发控制，20 个用户就会同时打 140 个请求出去。
