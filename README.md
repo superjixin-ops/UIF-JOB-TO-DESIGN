@@ -8,7 +8,7 @@
 |---|---|
 | 仓库 | [superjixin-ops/UIF-JOB-TO-DESIGN](https://github.com/superjixin-ops/UIF-JOB-TO-DESIGN) |
 | 在线演示 | `https://3eea34987613e6.app.lhr.life`（临时隧道，token `demo-token`） |
-| 规模 | **244 测试** · 45 模块 · 9,533 行主代码 + 3,227 行测试 |
+| 规模 | **247 测试** · 45 模块 · 9,646 行主代码 + 3,294 行测试 |
 | 效果 | 设计文档 **4 小时 → 13 秒**；反向生成 **留一法 4/4 通过**，平均 2 轮、约 $0.02 一条；143 个键值与源文件零差异 |
 | 技术栈 | Python 3.12 · FastAPI · asyncio · SQLite · LangGraph · MCP |
 
@@ -174,7 +174,7 @@ pdc/
 ops/       告警规则 + 检查脚本
 eval/      四指标评测 + 审计 golden set + 反向生成留一法 + 逐键保真审计
 rag/       检索评测（样例语料可复现）、α 扫描、A/B、引用分析
-tests/     244 个用例
+tests/     247 个用例
 loadtest/  并发压测
 samples/   虚构样例数据（可公开）
 scripts/   本地启动 + 隧道 + 语料结构统计
@@ -392,6 +392,9 @@ uv run pdc index build --repo samples/pipelines --out out/index --backend numpy
 # 换 sqlite-vec（单文件、可增量、支持分区过滤）
 uv run pdc index build --repo samples/pipelines --out out/index --backend sqlite-vec
 
+# 增量更新：只 embed 新增/变更的条目
+uv run pdc index update --repo samples/pipelines --out out/index
+
 # 查询（中文会自动补英文关键词）
 uv run pdc search "订单履约的流水线" --index out/index -k 5
 uv run pdc search "客户维度" --index out/index --where "chain=eid"
@@ -411,6 +414,16 @@ uv run pdc bench --index out/index --sizes 1000,10000,100000
 **结论：两种规模下查询都是几十毫秒，向量库赢 1.8 倍，但构建慢 160 倍。**
 真正的瓶颈不是索引，是 **embedding**：1,000 条真实 pipeline 建卡编码要 5 分钟
 （5,816 条约 30 分钟）。换库不解决这件事。
+
+所以补了 **增量更新**：
+
+```
+全量 1,000 条     约 5 分钟
+改 1 条后 update  约 2 秒（只 embed 那 1 条）
+```
+
+这才是向量库真正的价值——**日常维护从分钟级降到秒级**，不是查询快 1.8 倍。
+判定"变了"用卡片文本而不是文件 mtime（checkout 会让 mtime 变、内容没变）。
 
 所以向量库在这里的价值是**持久化 / 增量更新 / 分区过滤**，不是速度。
 默认仍然用 numpy；sqlite-vec 是可选后端。

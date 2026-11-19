@@ -151,6 +151,14 @@ class SqliteVecStore:
                 break
         return out
 
+    def delete(self, ids: list[str]) -> int:
+        if not ids:
+            return 0
+        marks = ",".join("?" for _ in ids)
+        cur = self._conn.execute(f"DELETE FROM items WHERE id IN ({marks})", ids)
+        self._conn.commit()
+        return int(cur.rowcount or 0)
+
     def count(self) -> int:
         return int(self._conn.execute("SELECT count(*) FROM items").fetchone()[0])
 

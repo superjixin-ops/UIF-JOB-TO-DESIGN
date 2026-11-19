@@ -584,3 +584,52 @@ PDC_EMBED_MODEL=intfloat/multilingual-e5-small uv run pdc index build ...
 
 正确的依据只能是**排序**（R@1/3/5），而排序需要标注集。
 在这之前，"不 embed 原始 YAML"只是假设。
+
+---
+
+## 七、增量更新：向量库真正的价值
+
+前面测下来，sqlite-vec 查询只比 numpy 快 1.8 倍，构建却慢 160 倍。
+**那为什么还要它？** 因为日常维护不是"重建"，是"改几条"。
+
+```bash
+pdc index update --repo <语料> --out out/index
+```
+
+| 场景 | 耗时 |
+|---|---|
+| 全量 build（1,000 条） | 约 5 分钟（瓶颈是 embedding） |
+| 改 1 条后 update | 约 2 秒（只 embed 那 1 条） |
+
+### 怎么判断"变了"
+
+用**卡片文本**比较，不用文件 mtime：
+
+```
+mtime 会因为 git checkout / rsync 变化，但内容没变
+-> 误判成 changed -> 白 embed 一遍
+```
+
+### 一个必须说清的取舍
+
+索引的单位是**卡片**，不是文件。
+
+改第 13 列的名字，卡片只取前 12 列，文本没变 → 不会重新 embed。
+
+这不是 bug，是"摘要"的代价：
+
+- 卡片让索引小一个数量级（600 行 → 7 行）
+- 代价是卡片之外的变化不影响向量
+
+如果某个字段对检索重要，就把它加进卡片，而不是指望"文件变了就重算"。
+
+### 验证
+
+```bash
+uv run pytest tests/test_vectorstore.py -q
+# test_incremental_update_embeds_only_changes
+# test_incremental_update_sqlite_backend
+# test_update_bootstraps_when_index_missing
+```
+
+第一条用例完整走了一遍：无变化 → 0 条；改一个 job 类型 → 1 条；删一个文件 → 1 条。

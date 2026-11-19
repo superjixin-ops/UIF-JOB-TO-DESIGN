@@ -28,6 +28,21 @@ jobs:
       - name: Test
         run: uv run pytest -q
 
+      # 备份没演练过等于没有备份。这一步在 CI 里真的走一遍
+      # 创建 -> 校验 -> 恢复，而不是只跑单测。
+      - name: Backup drill
+        run: |
+          uv run python -c "from pdc.jobs import JobStore; JobStore('out/jobs.db')"
+          uv run python -c "from pdc.audit_log import AuditLog; AuditLog('out/audit.db').append(actor='ci', role='admin', action='ci.smoke')"
+          uv run pdc backup create --out /tmp/bk --keep 3
+          ARCHIVE="$(ls /tmp/bk/backup-*.tar.gz | head -1)"
+          uv run pdc backup verify --archive "$ARCHIVE"
+          rm -rf /tmp/restore
+          uv run pdc backup restore --archive "$ARCHIVE" --to /tmp/restore
+          test -f /tmp/restore/jobs.db
+          test -f /tmp/restore/audit.db
+          uv run pdc audit-log verify --db /tmp/restore/audit.db
+
   docker:
     runs-on: ubuntu-latest
     steps:

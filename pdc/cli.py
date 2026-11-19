@@ -382,7 +382,22 @@ def cmd_build(args: argparse.Namespace) -> int:
 
 
 def cmd_index(args: argparse.Namespace) -> int:
-    from pdc.search import build
+    from pdc.search import build, update
+
+    if args.action == "update":
+        result = update(
+            args.repo,
+            args.out,
+            backend=args.backend,
+            offline_embed=args.offline,
+            limit=args.limit or None,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(
+            f"\n新增 {result['added']} / 变更 {result['changed']} / 删除 {result['removed']}，"
+            f"只 embed 了 {result['embedded']} 条，耗时 {result.get('seconds', 0)}s"
+        )
+        return 0
 
     meta = build(
         args.repo,
@@ -582,7 +597,8 @@ def main(argv: list[str] | None = None) -> int:
     b.set_defaults(func=cmd_build)
 
     ix = sub.add_parser("index", help="建 pipeline 语义索引")
-    ix.add_argument("action", nargs="?", default="build", choices=["build"], help="目前只有 build")
+    ix.add_argument("action", nargs="?", default="build", choices=["build", "update"],
+                    help="build=全量重建；update=只处理新增/变更/删除")
     ix.add_argument("--repo", default="samples/pipelines")
     ix.add_argument("--out", default="out/index")
     ix.add_argument("--backend", choices=["numpy", "sqlite-vec"], default="numpy")

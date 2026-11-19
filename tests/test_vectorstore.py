@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -118,3 +120,68 @@ def test_sqlite_backend_roundtrip(tmp_path) -> None:
     assert meta["backend"] == "sqlite-vec"
     hits = search(tmp_path, "dim-product-family", k=2, offline_embed=True)
     assert hits
+
+
+# ---------------------------------------------------------------------------
+# 增量索引：只 embed 变化的部分
+# ---------------------------------------------------------------------------
+def _copy_samples(tmp_path: Path) -> Path:
+    import shutil
+
+    src = Path("samples/pipelines")
+    dst = tmp_path / "repo"
+    dst.mkdir()
+    for p in src.glob("*.yaml"):
+        shutil.copyfile(p, dst / p.name)
+    return dst
+
+
+def test_incremental_update_embeds_only_changes(tmp_path) -> None:
+    """全量重建是分钟级，增量应该是秒级——这是向量库的卖点，必须真的做出来。"""
+    from pdc.search import build, update
+
+    repo = _copy_samples(tmp_path)
+    out = tmp_path / "index"
+    build(repo, out, backend="numpy", offline_embed=True)
+
+    noop = update(repo, out, offline_embed=True)
+    assert noop["embedded"] == 0 and noop["count"] == 4
+
+    target = repo / "fact-order-fulfillment.yaml"
+    target.write_text(target.read_text(encoding="utf-8").replace("jobType: eid", "jobType: eid-v2", 1))
+    changed = update(repo, out, offline_embed=True)
+    assert changed["changed"] == 1
+    assert changed["embedded"] == 1
+    assert changed["count"] == 4
+
+    (repo / "dim-product-family.yaml").unlink()
+    removed = update(repo, out, offline_embed=True)
+    assert removed["removed"] == 1
+    assert removed["count"] == 3
+    assert removed["embedded"] == 0
+
+
+def test_incremental_update_sqlite_backend(tmp_path) -> None:
+    from pdc.search import build, update
+
+    repo = _copy_samples(tmp_path)
+    out = tmp_path / "index"
+    build(repo, out, backend="sqlite-vec", offline_embed=True)
+
+    noop = update(repo, out, offline_embed=True)
+    assert noop["embedded"] == 0 and noop["count"] == 4
+
+    target = repo / "fact-order-fulfillment.yaml"
+    target.write_text(target.read_text(encoding="utf-8").replace("jobType: eid", "jobType: eid-v2", 1))
+    changed = update(repo, out, offline_embed=True)
+    assert changed["changed"] == 1 and changed["count"] == 4
+
+
+def test_update_bootstraps_when_index_missing(tmp_path) -> None:
+    from pdc.search import update
+
+    repo = _copy_samples(tmp_path)
+    out = tmp_path / "index"
+    result = update(repo, out, offline_embed=True)
+    assert result["mode"] == "full"
+    assert result["count"] == 4

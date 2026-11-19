@@ -109,6 +109,95 @@ def build(
     return meta
 
 
+def update(
+    repo: str | Path,
+    out: str | Path,
+    *,
+    backend: str = "",
+    offline_embed: bool = False,
+    limit: int | None = None,
+) -> dict:
+    """增量更新索引：只 embed 新增和变更的条目。
+
+    为什么这条命令比 build 重要：
+        全量重建 1,000 条要 5 分钟（embedding 是瓶颈）。
+        每天改几条 pipeline，重算全部是纯浪费。
+        增量更新把"日常维护"从分钟级降到秒级——
+        这正是向量库相对于 numpy 的卖点，不做这一步，卖点只是口号。
+
+    判定"变了"用卡片文本，不用文件 mtime：
+        mtime 会因为 checkout/pull 变化，但内容没变，会造成误重算。
+    """
+    import time
+
+    d = Path(out)
+    meta_path = d / META
+    if not meta_path.exists():
+        # 没有旧索引就等价于全量构建
+        meta = build(repo, out, backend=backend or "numpy", offline_embed=offline_embed, limit=limit)
+        return {"mode": "full", "embedded": meta["count"], "added": meta["count"],
+                "changed": 0, "removed": 0, "count": meta["count"], "seconds": 0.0}
+
+    t0 = time.perf_counter()
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    backend = backend or meta["backend"]
+
+    old = {c["id"]: c for c in read_cards(d / "cards.jsonl")}
+    new = {c.id: c for c in build_cards(repo, limit=limit)}
+
+    added = [i for i in new if i not in old]
+    removed = [i for i in old if i not in new]
+    changed = [
+        i for i in new
+        if i in old and new[i].text != old[i].get("text", "")
+    ]
+    to_embed = added + changed
+
+    embedder = get_embedder(offline=offline_embed)
+    vectors = embedder.encode([new[i].text for i in to_embed]) if to_embed else None
+
+    # 卡片文件先整体重写：它只是展示用，重建成本可以忽略
+    write_cards(list(new.values()), d / "cards.jsonl")
+
+    if backend == "sqlite-vec":
+        store = SqliteVecStore(d / "index.db", dim=meta["dim"])
+        store.delete(removed)
+        if to_embed:
+            store.add([
+                (i, vectors[k], new[i].meta) for k, i in enumerate(to_embed)
+            ])
+        count = store.count()
+        store.close()
+    else:
+        rows = read_cards(d / "index.jsonl") if (d / "index.jsonl").exists() else []
+        matrix = np.load(d / "vectors.npy") if (d / "vectors.npy").exists() else None
+        by_id = {}
+        if rows and matrix is not None:
+            for row, vec in zip(rows, matrix, strict=True):
+                by_id[row["id"]] = (vec, {k: v for k, v in row.items() if k != "id"})
+        for i in removed:
+            by_id.pop(i, None)
+        for k, i in enumerate(to_embed):
+            by_id[i] = (vectors[k], new[i].meta)
+        ids = list(by_id)
+        JsonlStore(d).save(ids, np.vstack([by_id[i][0] for i in ids]), [by_id[i][1] for i in ids])
+        count = len(ids)
+
+    meta.update({"backend": backend, "count": count, "embedder": embedder.name})
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    return {
+        "mode": "incremental",
+        "backend": backend,
+        "added": len(added),
+        "changed": len(changed),
+        "removed": len(removed),
+        "embedded": len(to_embed),
+        "count": count,
+        "seconds": round(time.perf_counter() - t0, 2),
+    }
+
+
 def load_store(index_dir: str | Path):
     d = Path(index_dir)
     meta_path = d / META
