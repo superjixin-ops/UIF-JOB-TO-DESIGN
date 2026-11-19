@@ -19,6 +19,11 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 # 第二阶段：源码就位后再装项目本身
+#
+# README.md 必须一起拷：pyproject 里 readme = "README.md"，
+# hatchling 打包项目时要读它，缺了会报 "Readme file does not exist"。
+# 第一阶段加了 --no-install-project 才把这个问题暴露出来。
+COPY README.md ./
 COPY pdc ./pdc
 COPY eval ./eval
 # 样例数据：容器里没有 ~/Documents/CRD-7，必须自带
