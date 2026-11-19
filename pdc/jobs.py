@@ -25,6 +25,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
     id          TEXT PRIMARY KEY,
     pipeline    TEXT NOT NULL,
+    kind        TEXT NOT NULL DEFAULT 'design',
     mode        TEXT NOT NULL,
     status      TEXT NOT NULL,
     created_at  REAL NOT NULL,
@@ -49,6 +50,7 @@ class RunRecord:
     status: str
     created_at: float
     updated_at: float
+    kind: str = "design"
     steps: int = 0
     tokens_in: int = 0
     tokens_out: int = 0
@@ -61,6 +63,7 @@ class RunRecord:
         return {
             "run_id": self.id,
             "pipeline": self.pipeline,
+            "kind": self.kind,
             "mode": self.mode,
             "status": self.status,
             "created_at": self.created_at,
@@ -81,6 +84,11 @@ class JobStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._conn()) as conn:
             conn.executescript(SCHEMA)
+            # 老库没有 kind 列：加列而不是重建表。
+            # 生产里的迁移都该这样——ADD COLUMN 是 O(1)，重建表要停机。
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+            if "kind" not in cols:
+                conn.execute("ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'design'")
             conn.commit()
 
     def _conn(self) -> sqlite3.Connection:
@@ -89,13 +97,15 @@ class JobStore:
         return conn
 
     # ------------------------------------------------------------------
-    def create(self, run_id: str, pipeline: str, mode: str) -> RunRecord:
+    def create(
+        self, run_id: str, pipeline: str, mode: str, kind: str = "design"
+    ) -> RunRecord:
         now = time.time()
         with closing(self._conn()) as conn:
             conn.execute(
-                "INSERT INTO runs (id, pipeline, mode, status, created_at, updated_at) "
-                "VALUES (?, ?, ?, 'queued', ?, ?)",
-                (run_id, pipeline, mode, now, now),
+                "INSERT INTO runs (id, pipeline, kind, mode, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, 'queued', ?, ?)",
+                (run_id, pipeline, kind, mode, now, now),
             )
             conn.commit()
         return RunRecord(run_id, pipeline, mode, "queued", now, now)
@@ -154,6 +164,7 @@ class JobStore:
         return RunRecord(
             id=row["id"],
             pipeline=row["pipeline"],
+            kind=row["kind"] or "design",
             mode=row["mode"],
             status=row["status"],
             created_at=row["created_at"],

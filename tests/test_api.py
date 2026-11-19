@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import json
-import threading
 import time
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-import pdc.api as api
+from pdc import api
 from pdc.jobs import JobStore
 from pdc.security import RateLimiter
 
@@ -185,3 +184,73 @@ def test_index_serves_ui():
     r = client.get("/")
     assert r.status_code == 200
     assert "Pipeline Design Copilot" in r.text
+
+
+# ---------------------------------------------------------------- build 方向
+def _make_design(out_dir: Path) -> Path:
+    from pdc.design import build_design
+    from pdc.parser import parse_pipeline
+    from pdc.render import render_xlsx
+
+    facts = parse_pipeline("samples/pipelines/fact-order-fulfillment.yaml")
+    return render_xlsx(build_design(facts), out_dir / "fact-order-fulfillment-design.xlsx")
+
+
+def test_build_requires_model_key(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    r = client.post("/build", json={"design": "x.xlsx"}, headers=AUTH)
+    assert r.status_code == 400
+    assert "真实模型" in r.json()["detail"]
+
+
+def test_build_missing_design_is_404(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "dummy")
+    monkeypatch.setattr(api, "OUT", tmp_path)
+    r = client.post("/build", json={"design": "nope.xlsx"}, headers=AUTH)
+    assert r.status_code == 404
+
+
+def test_build_success_with_stubbed_model(tmp_path, monkeypatch):
+    """走完整的接口链路，只把模型换成桩。
+
+    这样测的是"接口 -> 后台线程 -> 状态机 -> files"这一段，
+    而不是模型能力——模型能力由 eval 负责，两类测试不能混。
+    """
+    from pdc.yamlgen import BuildResult
+
+    monkeypatch.setenv("OPENAI_API_KEY", "dummy")
+    monkeypatch.setattr(api, "OUT", tmp_path)
+    _make_design(tmp_path)
+
+    def fake_run_build(*args, **kwargs):
+        return BuildResult(
+            status="passed",
+            yaml_path=str(tmp_path / "generated.yaml"),
+            rounds=2,
+            steps=5,
+            passed=True,
+        )
+
+    monkeypatch.setattr(api, "run_build", fake_run_build)
+
+    r = client.post(
+        "/build",
+        json={"design": "fact-order-fulfillment-design.xlsx", "max_rounds": 4},
+        headers=AUTH,
+    )
+    assert r.status_code == 202
+    rec = wait_done(r.json()["run_id"])
+    assert rec["kind"] == "build"
+    assert rec["status"] == "succeeded"
+    assert rec["files"]["yaml"].endswith("generated.yaml")
+    assert "rounds=2" in rec["output"]
+
+
+def test_designs_endpoint_lists_xlsx(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "OUT", tmp_path)
+    _make_design(tmp_path)
+    r = client.get("/designs", headers=AUTH)
+    assert r.status_code == 200
+    names = [d["name"] for d in r.json()["designs"]]
+    assert "fact-order-fulfillment-design.xlsx" in names

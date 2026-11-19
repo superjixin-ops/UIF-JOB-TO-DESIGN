@@ -37,6 +37,7 @@ from pdc.agent import run_with_self_check
 from pdc.audit_log import AuditLog
 from pdc.auth import Principal, require_role
 from pdc.config import Settings
+from pdc.design_reader import SpecReadError, read_design
 from pdc.jobs import JobStore
 from pdc.llm import OpenAICompatibleLLM, RuleBasedLLM
 from pdc.memory import Memory, SessionStore, recall
@@ -46,6 +47,7 @@ from pdc.safety import wrap_untrusted
 from pdc.security import RateLimiter, token_budget
 from pdc.tools import Toolbox
 from pdc.trace import Tracer
+from pdc.yamlgen import requirement_from_design, run_build
 
 app = FastAPI(title="Pipeline Design Copilot", version="1.0.0")
 AUDIT = AuditLog()
@@ -63,6 +65,23 @@ STORE = JobStore(OUT / "jobs.db")
 STORE.mark_orphans()  # 上次进程留下的 queued/running 全部标失败
 
 app.mount("/files", StaticFiles(directory=str(OUT)), name="files")
+
+
+def _make_on_step(run_id: str):
+    """把 tracer 的每一步塞进内存，供 SSE 推送。"""
+
+    def on_step(step) -> None:
+        _LIVE.setdefault(run_id, []).append({
+            "index": step.index,
+            "kind": step.kind,
+            "name": step.name,
+            "latency_ms": step.latency_ms,
+            "tokens_in": step.tokens_in,
+            "tokens_out": step.tokens_out,
+            "error": step.error,
+        })
+
+    return on_step
 
 
 def _route(request: Request) -> str:
@@ -133,6 +152,13 @@ _LIVE: dict[str, list[dict]] = {}   # run_id -> 实时步骤（仅内存，用�
 UI_DIR = Path(__file__).parent / "ui"
 
 
+class BuildRequest(BaseModel):
+    design: str = Field(min_length=1, description="设计文档路径（.xlsx）")
+    model: str = ""
+    max_rounds: int = 6
+    session: str = ""
+
+
 class RunRequest(BaseModel):
     pipeline: str = Field(min_length=1)
     mode: str = Field(default="offline", pattern="^(offline|auto)$")
@@ -152,6 +178,9 @@ def health() -> dict:
         "token_budget": token_budget(),
         "auth_required": bool(os.getenv("PDC_TOKENS", "").strip() or os.getenv("PDC_API_TOKEN", "").strip()),
         "roles": sorted(SETTINGS.tokens.values()),
+        "build_available": bool(
+            os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
+        ),
         "paths": describe(),
     }
 
@@ -201,7 +230,7 @@ async def create_run(
         raise
     _LIVE[run_id] = []
 
-    METRICS.inc("pdc_runs_total", {"status": "accepted"})
+    METRICS.inc("pdc_runs_total", {"status": "accepted", "kind": "design"})
     METRICS.set("pdc_queue_depth", _active)
     AUDIT.append(
         actor=principal.token_id,
@@ -290,6 +319,82 @@ def audit_verify(_p: Principal = Depends(_ADMIN)) -> dict:
     return {"ok": ok, "first_bad_seq": bad_seq}
 
 
+@app.get("/designs")
+def list_designs(_p: Principal = Depends(_VIEWER)) -> dict:
+    """列出 out/ 下可用的设计文档，给前端下拉框用。"""
+    items = []
+    for path in sorted(OUT.glob("*.xlsx")):
+        name = path.name
+        pipeline = name[: -len("-design.xlsx")] if name.endswith("-design.xlsx") else path.stem
+        items.append(
+            {
+                "name": name,
+                "path": str(path),
+                "pipeline": pipeline,
+                "bytes": path.stat().st_size,
+            }
+        )
+    return {"directory": str(OUT), "designs": items}
+
+
+@app.post(
+    "/build",
+    status_code=202,
+    responses={400: {}, 401: {}, 404: {}, 429: {}},
+)
+async def create_build(
+    req: BuildRequest,
+    request: Request,
+    principal: Principal = Depends(_OPERATOR),
+    _rate: None = Depends(_rate_limit),
+) -> dict:
+    """设计文档 -> YAML。产物由模型写，校验器判。"""
+    if not (os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY")):
+        raise HTTPException(
+            status_code=400,
+            detail="build 方向必须用真实模型：产物是模型写的。设置 OPENAI_API_KEY 后重试。",
+        )
+
+    design = Path(req.design)
+    if not design.is_absolute():
+        design = OUT / req.design
+    if not design.exists():
+        raise HTTPException(status_code=404, detail=f"找不到设计文档: {design}")
+    try:
+        read_design(design)  # 提前校验：别等后台线程才失败
+    except SpecReadError as exc:
+        raise HTTPException(status_code=400, detail=f"读不了设计文档: {exc}") from exc
+
+    if not _admit():
+        raise HTTPException(
+            status_code=429,
+            detail=f"并发已满（{MAX_CONCURRENCY}）",
+            headers={"Retry-After": "2"},
+        )
+
+    run_id = uuid.uuid4().hex[:12]
+    try:
+        STORE.create(run_id, design.name, "auto", kind="build")
+    except Exception:
+        _release()
+        raise
+    _LIVE[run_id] = []
+
+    METRICS.inc("pdc_runs_total", {"status": "accepted", "kind": "build"})
+    METRICS.set("pdc_queue_depth", _active)
+    AUDIT.append(
+        actor=principal.token_id,
+        role=principal.role,
+        action="run.build",
+        target=design.name,
+        result="accepted",
+        ip=request.client.host if request.client else "",
+        detail=f"run_id={run_id}",
+    )
+    asyncio.create_task(asyncio.to_thread(_build_and_release, run_id, req, design))
+    return {"run_id": run_id, "status": "queued", "kind": "build", "poll": f"/runs/{run_id}"}
+
+
 @app.get("/runs/{run_id}/stream")
 async def stream_run(
     run_id: str,
@@ -333,22 +438,59 @@ async def stream_run(
 
 
 # ---------------------------------------------------------------- 执行
+def _build_and_release(run_id: str, req: BuildRequest, design: Path) -> None:
+    try:
+        _execute_build(run_id, req, design)
+    finally:
+        _release()
+
+
+def _execute_build(run_id: str, req: BuildRequest, design: Path) -> None:
+    tracer = Tracer(path=OUT / f"{run_id}.trace.jsonl")
+    tracer.on_step = _make_on_step(run_id)
+    STORE.update(run_id, status="running")
+    try:
+        spec = read_design(design)
+        llm = OpenAICompatibleLLM(req.model or "deepseek-chat")
+        result = run_build(
+            llm,
+            requirement_from_design(spec),
+            out_dir=OUT,
+            tracer=tracer,
+            max_rounds=req.max_rounds,
+            budget=token_budget() or None,
+            should_stop=lambda: run_id in _CANCELS,
+        )
+        stats = tracer.stats()
+        status = "cancelled" if run_id in _CANCELS else (
+            "succeeded" if result.passed else "failed"
+        )
+        summary = (
+            f"rounds={result.rounds} passed={result.passed} "
+            f"issues={len(result.issues)} violations={len(result.violations)}"
+        )
+        STORE.update(
+            run_id,
+            status=status,
+            steps=stats["steps"],
+            tokens_in=stats["tokens_in"],
+            tokens_out=stats["tokens_out"],
+            files={"yaml": result.yaml_path} if result.yaml_path else {},
+            issues=[
+                f"{i.get('code')}: {i.get('message')}" for i in result.issues
+            ][:20],
+            output=summary,
+        )
+    except Exception as exc:  # noqa: BLE001
+        STORE.update(run_id, status="failed", error=f"{type(exc).__name__}: {exc}")
+    finally:
+        _CANCELS.discard(run_id)
+
+
 def _execute_and_store(run_id: str, req: RunRequest) -> None:
     trace_path = OUT / f"{run_id}.trace.jsonl"
     tracer = Tracer(path=trace_path)
-
-    def on_step(step) -> None:
-        _LIVE.setdefault(run_id, []).append({
-            "index": step.index,
-            "kind": step.kind,
-            "name": step.name,
-            "latency_ms": step.latency_ms,
-            "tokens_in": step.tokens_in,
-            "tokens_out": step.tokens_out,
-            "error": step.error,
-        })
-
-    tracer.on_step = on_step
+    tracer.on_step = _make_on_step(run_id)
     STORE.update(run_id, status="running")
 
     memory = None

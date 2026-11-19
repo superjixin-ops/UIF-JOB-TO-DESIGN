@@ -8,7 +8,7 @@
 |---|---|
 | 仓库 | [superjixin-ops/UIF-JOB-TO-DESIGN](https://github.com/superjixin-ops/UIF-JOB-TO-DESIGN) |
 | 在线演示 | `https://3eea34987613e6.app.lhr.life`（临时隧道，token `demo-token`） |
-| 规模 | **247 测试** · 45 模块 · 9,646 行主代码 + 3,294 行测试 |
+| 规模 | **251 测试** · 45 模块 · 9,799 行主代码 + 3,363 行测试 |
 | 效果 | 设计文档 **4 小时 → 13 秒**；反向生成 **留一法 4/4 通过**，平均 2 轮、约 $0.02 一条；143 个键值与源文件零差异 |
 | 技术栈 | Python 3.12 · FastAPI · asyncio · SQLite · LangGraph · MCP |
 
@@ -174,7 +174,7 @@ pdc/
 ops/       告警规则 + 检查脚本
 eval/      四指标评测 + 审计 golden set + 反向生成留一法 + 逐键保真审计
 rag/       检索评测（样例语料可复现）、α 扫描、A/B、引用分析
-tests/     247 个用例
+tests/     251 个用例
 loadtest/  并发压测
 samples/   虚构样例数据（可公开）
 scripts/   本地启动 + 隧道 + 语料结构统计
@@ -1021,10 +1021,12 @@ export PDC_API_TOKEN=your-token
 ### 异步任务 + 持久化
 
 ```
-POST /runs          → 202 {run_id, status:"queued"}   立即返回，不再阻塞 12 秒
+POST /runs          → 202 {run_id, status:"queued"}   设计文档方向
+POST /build         → 202 {run_id, kind:"build"}      YAML 方向（需真实模型）
+GET  /designs       → out/ 下可用的设计文档
 GET  /runs/{id}     → status: queued|running|succeeded|failed|cancelled
 GET  /runs/{id}/trace   → 每一步
-GET  /runs/{id}/stream  → SSE 实时推送
+GET  /runs/{id}/stream  → SSE 实时推送（EventSource 用 ?token=）
 POST /runs/{id}/cancel  → 软取消（当前步骤结束后停）
 ```
 
@@ -1033,7 +1035,16 @@ POST /runs/{id}/cancel  → 软取消（当前步骤结束后停）
 
 ### 前端
 
-`GET /` 提供控制台：选流水线 → 发起 → 实时时间线 → 下载产物。
+`GET /` 提供控制台，一个入口两个方向：
+
+```
+任务类型：设计文档（YAML → 文档） / 生成 YAML（文档 → YAML）
+实时时间线：llm / tool / safety / final，带 token 和耗时
+完成后：状态徽章 + 下载产物；失败时拉取 issues 显示原因
+```
+
+异步与前端的设计（为什么 202、为什么用线程不是 async、SSE 怎么实现、
+加第三种任务要改哪五处）见 [`docs/api-and-ui.md`](docs/api-and-ui.md)。
 
 单文件 HTML + 原生 JS + EventSource，**没有构建步骤**——因为这台机器没有 node，
 也不想为了一个页面引入工具链。

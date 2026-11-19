@@ -34,16 +34,19 @@
   .stat b { display:block; font-size:18px; color:var(--accent); }
   .stat span { font-size:11px; color:var(--muted); }
   #timeline { list-style:none; margin:0; padding:0; max-height:460px; overflow:auto; }
-  #timeline li { display:grid; grid-template-columns:26px 64px 1fr auto;
+  #timeline li { display:grid; grid-template-columns:46px 118px 1fr auto;
                  gap:8px; align-items:center; padding:7px 8px;
                  border-bottom:1px solid var(--line); font-size:12.5px; }
   #timeline li:last-child { border-bottom:0; }
-  .kind { font-size:10px; text-align:center; border-radius:4px; padding:2px 0;
+  .kind { font-size:9.5px; text-align:center; border-radius:4px; padding:2px 0;
           background:#eef2f9; color:var(--accent); font-weight:600; }
   .kind.tool { background:#e8f5ec; color:var(--ok); }
   .kind.safety { background:#fdecea; color:var(--err); }
   .ms { color:var(--muted); font-variant-numeric:tabular-nums; }
-  .empty { color:var(--muted); font-size:12.5px; padding:20px 0; text-align:center; }
+  /* 空状态的 li 只有一个文本节点，会落进 26px 的第一列竖排。
+     它不该继承网格布局。 */
+  #timeline li.empty { display:block; color:var(--muted);
+                       font-size:12.5px; padding:20px 0; text-align:center; }
   #status { font-size:12px; color:var(--muted); margin-top:10px; }
   .badge { display:inline-block; padding:1px 7px; border-radius:999px;
            font-size:11px; font-weight:600; }
@@ -58,20 +61,37 @@
 <body>
 <header>
   <h1>Pipeline Design Copilot</h1>
-  <p id="sub">读取流水线配置，生成设计文档并自检</p>
+  <p id="sub">一个入口，两个方向：YAML → 设计文档；设计文档 → YAML</p>
 </header>
 
 <main>
   <section class="card">
     <h2>新建任务</h2>
-    <label for="pipeline">流水线</label>
-    <select id="pipeline"></select>
 
-    <label for="mode">模式</label>
-    <select id="mode">
-      <option value="offline">offline（不调模型，免费）</option>
-      <option value="auto">auto（真实模型）</option>
+    <label for="kind">任务类型</label>
+    <select id="kind">
+      <option value="design">设计文档（YAML → 文档）</option>
+      <option value="build">生成 YAML（文档 → YAML，需真实模型）</option>
     </select>
+
+    <div id="design-fields">
+      <label for="pipeline">流水线</label>
+      <select id="pipeline"></select>
+
+      <label for="mode">模式</label>
+      <select id="mode">
+        <option value="offline">offline（不调模型，免费）</option>
+        <option value="auto">auto（真实模型）</option>
+      </select>
+    </div>
+
+    <div id="build-fields" style="display:none">
+      <label for="design">设计文档</label>
+      <select id="design"></select>
+      <p style="margin:6px 0 0;font-size:12px;color:#667085">
+        先生成一份：<code>uv run pdc design samples/pipelines/fact-order-fulfillment.yaml</code>
+      </p>
+    </div>
 
     <label for="token">API Token（服务端配了才需要）</label>
     <input id="token" type="password" placeholder="留空则不带鉴权头" />
@@ -107,6 +127,30 @@ function authHeaders() {
   return t ? { 'Authorization': 'Bearer ' + t } : {};
 }
 
+async function loadDesigns() {
+  try {
+    const r = await fetch('/designs', { headers: authHeaders() });
+    if (!r.ok) throw new Error(r.status);
+    const data = await r.json();
+    if (!data.designs.length) {
+      $('design').innerHTML = '<option value="">（out/ 下还没有设计文档）</option>';
+      return;
+    }
+    $('design').innerHTML = data.designs
+      .map(d => `<option value="${d.name}">${d.pipeline}</option>`).join('');
+  } catch (e) {
+    $('design').innerHTML = `<option>加载失败：${e.message}</option>`;
+  }
+}
+
+function syncKind() {
+  const build = $('kind').value === 'build';
+  $('design-fields').style.display = build ? 'none' : '';
+  $('build-fields').style.display = build ? '' : 'none';
+  $('run').textContent = build ? '生成 YAML' : '开始';
+}
+$('kind').onchange = syncKind;
+
 async function loadPipelines() {
   try {
     const r = await fetch('/pipelines', { headers: authHeaders() });
@@ -128,7 +172,7 @@ function addStep(s) {
   const tok = (s.tokens_in || 0) + (s.tokens_out || 0);
   li.innerHTML = `
     <span class="kind ${kind}">${s.kind}</span>
-    <span>${(s.name || '').slice(0, 14)}</span>
+    <span>${(s.name || '').slice(0, 18)}</span>
     <span>${s.error ? '<span style="color:#b42318">' + s.error.slice(0,60) + '</span>' : ''}</span>
     <span class="ms">${s.latency_ms || 0}ms${tok ? ' · ' + tok + 'tok' : ''}</span>`;
   list.appendChild(li);
@@ -167,6 +211,19 @@ async function finish(status, files) {
       const name = String(v).split('/').pop();
       return `<a href="/files/${encodeURIComponent(name)}" target="_blank">下载 ${k} · ${name}</a>`;
     }).join('');
+
+  // 失败时把原因拉出来，否则页面上只有一个红字
+  if (status !== 'succeeded' && runId) {
+    try {
+      const r = await fetch(`/runs/${runId}`, { headers: authHeaders() });
+      const d = await r.json();
+      if (d.output) $('files').innerHTML += `<p style="font-size:12px">${d.output}</p>`;
+      if (d.issues && d.issues.length) {
+        $('files').innerHTML += '<ul style="font-size:12px">' +
+          d.issues.slice(0, 5).map(i => `<li>${i}</li>`).join('') + '</ul>';
+      }
+    } catch (_) { /* 拉不到就算了，不阻塞页面 */ }
+  }
 }
 
 $('run').onclick = async () => {
@@ -177,10 +234,16 @@ $('run').onclick = async () => {
   started = Date.now();
 
   try {
-    const r = await fetch('/runs', {
+    const build = $('kind').value === 'build';
+    const url = build ? '/build' : '/runs';
+    const body = build
+      ? { design: $('design').value, max_rounds: 6 }
+      : { pipeline: $('pipeline').value, mode: $('mode').value };
+
+    const r = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify({ pipeline: $('pipeline').value, mode: $('mode').value }),
+      body: JSON.stringify(body),
     });
     if (!r.ok) {
       const t = await r.text();
@@ -203,6 +266,8 @@ $('cancel').onclick = async () => {
 };
 
 loadPipelines();
+loadDesigns();
+syncKind();
 </script>
 </body>
 </html>
