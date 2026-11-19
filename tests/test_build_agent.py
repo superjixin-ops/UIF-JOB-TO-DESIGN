@@ -142,7 +142,7 @@ def test_base_yaml_is_valid() -> None:
         (lambda s: s.replace("kind: DimensionPipeline", "kind: Something"), "E_KIND"),
         (lambda s: s.replace("        size: S\n", ""), "E_SIZE"),
         (lambda s: s.replace("        size: S", "        size: HUGE"), "E_SIZE_VALUE"),
-        (lambda s: s.replace("          main_df: true\n", ""), "E_MAIN_DF"),
+        (lambda s: s.replace("          main_df: true\n", ""), "W_MAIN_DF"),
         (
             lambda s: s.replace("            dataType: StringType\n", ""),
             "E_COL_TYPE",
@@ -523,3 +523,61 @@ def test_fidelity_catches_fabricated_field(tmp_path: Path) -> None:
 
     diffs = audit(src, broken)
     assert any("madeUpKey" in str(d) for d in diffs)
+
+
+# ---------------------------------------------------------------------------
+# 6. 真实语料逼出来的形状（CRD-7 体检）
+# ---------------------------------------------------------------------------
+def test_schema_template_does_not_crash() -> None:
+    """`schema: Template` 是字符串，不是列表。
+
+    真实语料里有大量这种写法（引用模板，不是内联列）。
+    第一版校验器直接对它 .get()，整个进程崩掉。
+    """
+    text = BASE.replace("        schema:\n", "        schema: Template\n        schema2:\n")
+    issues = validate_text(text)
+    assert any(i.code == "W_SCHEMA_TEMPLATE" for i in issues)
+    # 只是警告，不能阻断——模板引用是合法写法
+    assert not any(i.severity == "error" for i in issues)
+
+
+def test_template_ref_extract_is_not_an_error() -> None:
+    """模板引用型 extract 没有 connections，是合法写法。"""
+    text = BASE.replace(
+        """        - extractType: default
+          alias: TINY_SRC
+          main_df: true
+          connections:
+            - credentials: demo-cos
+              connector: cos
+              query: landing/tiny.parquet""",
+        """        - templateName: tiny-extract-template""",
+    )
+    codes = {i.code for i in validate_text(text)}
+    assert "W_TEMPLATE_REF" in codes
+    assert "E_CONN" not in codes
+
+
+def test_missing_connector_is_a_warning_not_a_blocker() -> None:
+    """connection 省略 connector 在真实语料里很常见（credentials 已隐含）。
+
+    强制要求会把大量合法文件判死，也会逼模型编一个连接器出来。
+    """
+    text = BASE.replace("              connector: cos\n", "", 1)
+    issues = validate_text(text)
+    assert "W_CONN" in {i.code for i in issues}
+    assert not any(i.severity == "error" for i in issues)
+
+
+def test_secret_regex_only_flags_realistic_keys() -> None:
+    """占位标识符不能报成密钥。
+
+    真实语料里出现过 25 字符的 `sk-...` 标识符，被误报成泄漏。
+    真实 key 至少 32 位（DeepSeek 32、OpenAI 48）。
+    """
+    short = BASE.replace("name: dim-tiny", "name: dim-tiny\n  note: sk-abc-def-ghi-jkl")
+    assert "E_SECRET" not in {i.code for i in validate_text(short)}
+
+    long_key = "sk-" + "a" * 40
+    leaked = BASE.replace("name: dim-tiny", f"name: dim-tiny\n  note: {long_key}")
+    assert "E_SECRET" in {i.code for i in validate_text(leaked)}

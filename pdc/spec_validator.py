@@ -29,7 +29,9 @@ UPPER_SNAKE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 ALLOWED_SIZES = {"T", "S", "M", "L", "XL", "XXL"}
 ALLOWED_KIND = {"FactPipeline", "DimensionPipeline"}
 SECRET_PATTERNS = [
-    re.compile(r"sk-[A-Za-z0-9_-]{16,}"),
+    # 32 位以上才当密钥。真实 key 最短也在 32 位（DeepSeek 32、OpenAI 48），
+    # 16 位会把 "sk-xxx-yyy" 这种占位标识符误判成泄漏。
+    re.compile(r"sk-[A-Za-z0-9_-]{32,}"),
     re.compile(r"(?i)(password|passwd|secret)\s*[:=]\s*\S+"),
 ]
 
@@ -98,6 +100,12 @@ def validate_text(text: str, filename: str = "pipeline.yaml") -> list[Issue]:
 
     # 3) 逐 job 检查
     for idx, job in enumerate(jobs):
+        if not isinstance(job, dict):
+            issues.append(Issue(
+                "E_JOB_SHAPE", f"spec.jobs 第 {idx + 1} 项不是 mapping，而是 {type(job).__name__}",
+                "每个 job 必须是一个 mapping，至少包含 jobType",
+            ))
+            continue
         jt = job.get("jobType", f"#{idx}")
         size = (job.get("setups") or {}).get("size")
         if not size:
@@ -112,49 +120,112 @@ def validate_text(text: str, filename: str = "pipeline.yaml") -> list[Issue]:
             ))
 
         extracts = job.get("extract") or []
+        if not isinstance(extracts, list):
+            issues.append(Issue(
+                "E_EXTRACT_SHAPE", f"job {jt} 的 extract 不是列表",
+                "extract 必须是列表，每一项是一个 mapping",
+            ))
+            extracts = []
         main_count = sum(1 for e in extracts if e.get("main_df") is True)
         if len(extracts) and main_count < 1:
-            # 只要求"至少有一个主数据集"，不要求"只有一个"。
+            # 只提示，不阻断。
             #
-            # 原来写的是 != 1，结果样例 fact-inventory-snapshot 直接过不了——
-            # 那条流水线有两个 fact 源（库存快照 + 库存调整）join 在一起，
-            # 两个都是 main_df: true。**是我的规则错了，不是数据错了。**
+            # 这条规则改过两次，每次都是"把观察当规范"：
+            #   1.0  要求恰好一个 -> 样例 fact-inventory-snapshot 有两个 fact 源，卡死
+            #   2.0  改成"至少一个" -> 在 CRD-7 的 5,545 条真实流水线上，
+            #        19,688 个 job 里有 2,779 个（14%）确实没有 main_df，规则仍然错
+            #   3.0  降级为 warning，具体哪几个由文档逐项比对（S_MAIN_DF）
             #
-            # 这正是"校验器把自己的假设当规范"的典型：
-            # 一条从三五个样例里总结出来的规律，写进裁判就变成了硬约束。
-            # 现在改成只检查"有没有"，具体哪几个由文档逐项比对（S_MAIN_DF）。
+            # 结论：**"有没有"只能由输入文档决定，不能由校验器假设。**
             issues.append(Issue(
-                "E_MAIN_DF", f"job {jt} 有 {len(extracts)} 个 extract，但一个 main_df: true 都没有",
-                "至少把一个主数据集的 main_df 写成 true",
+                "W_MAIN_DF", f"job {jt} 有 {len(extracts)} 个 extract，但一个 main_df: true 都没有",
+                "如果文档里也没有标记主数据集，这是合法的；否则补上 main_df: true",
+                severity="warning",
             ))
 
         for e in extracts:
-            alias = e.get("alias", "?")
+            if not isinstance(e, dict):
+                issues.append(Issue(
+                    "E_EXTRACT_SHAPE", f"job {jt} 的 extract 里有非 mapping 项：{e!r}",
+                    "每一项必须是 mapping",
+                ))
+                continue
+            alias = e.get("alias") or e.get("templateName") or e.get("templateSource") or "?"
             if not UPPER_SNAKE.match(str(alias)):
                 issues.append(Issue(
                     "W_ALIAS", f"extract 别名 {alias!r} 不是 UPPER_SNAKE",
                     "改成大写加下划线，例如 ORDER_LINES",
                     severity="warning",
                 ))
-            conn = (e.get("connections") or [{}])[0]
-            for key in ("connector", "query"):
-                if not conn.get(key):
+            conns = e.get("connections") or []
+            if not conns:
+                # 真实语料里有大量"模板引用"型 extract：
+                #   - templateName: xxx
+                # 它没有内联 connections，连接定义在模板里。
+                # 这不是错误，但也不能按内联连接去要求 connector。
+                if e.get("templateName") or e.get("templateSource"):
                     issues.append(Issue(
-                        "E_CONN", f"extract {alias} 的 connection 缺 {key}",
-                        f"补上 {key}，例如 connector: cos / query: landing/xxx",
+                        "W_TEMPLATE_REF", f"extract {alias} 通过模板引用连接",
+                        "连接定义在模板里，本文件不展开；如需列级契约，请展开模板",
+                        severity="warning",
                     ))
+                else:
+                    issues.append(Issue(
+                        "E_CONN", f"extract {alias} 没有任何 connections",
+                        "补上 connections，或用 templateName 引用模板",
+                    ))
+                continue
+            conn = conns[0] if isinstance(conns[0], dict) else {}
+            if not conn.get("connector"):
+                # 只提示。真实语料里有大量 connection 省略 connector 的写法
+                # （credentials: cos 已经隐含了连接器）。强制要求会把合法文件判死。
+                issues.append(Issue(
+                    "W_CONN", f"extract {alias} 的 connection 没写 connector",
+                    "补上 connector 更明确，例如 connector: cos",
+                    severity="warning",
+                ))
+            # 不同 connector 的定位字段不同：cos/skapi 用 query，
+            # box 用 file_name + path，jdbc 用 query/table。
+            # 只认 query 会把真实语料里 36% 的文件判死。
+            locators = ("query", "file_name", "table", "path", "topic", "directory")
+            if not any(conn.get(k) for k in locators):
+                issues.append(Issue(
+                    "W_CONN_LOCATOR", f"extract {alias} 的 connection 没有定位字段",
+                    "至少写 query / file_name / table 之一",
+                    severity="warning",
+                ))
 
         # load 契约
         load = job.get("load")
         if load:
             schema = load.get("schema") or []
-            if jt == "eid" and not schema:
+            if not isinstance(schema, list):
+                # 真实语料里大量写成 `schema: Template`（引用模板，不是内联列表）。
+                # 这里不是错误，只是"未内联声明"——但不能拿去遍历，
+                # 否则会对字符串做 .get()，整个校验器崩掉。
                 issues.append(Issue(
-                    "E_LOAD_SCHEMA", f"job {jt} 的 load 没有 schema",
-                    "把输出列写进 load.schema：columnName + dataType + nullAble",
+                    "W_SCHEMA_TEMPLATE", f"job {jt} 的 load.schema 不是内联列表（{schema!r}）",
+                    "如果确实由模板/connector 推断，保持原样；否则展开成完整列清单",
+                    severity="warning",
+                ))
+                schema = []
+            if jt == "eid" and not schema:
+                # 同样降级。CRD-7 里 eid 的 schema 声明率是 73%——
+                # 剩下 27% 靠 connector 推断（schema: Template 或省略）。
+                # 强制要求 schema 会把大量合法流水线判死，而且会逼模型编列。
+                issues.append(Issue(
+                    "W_LOAD_SCHEMA", f"job {jt} 的 load 没有 schema",
+                    "如果文档写明 schema 由 connector 推断，这是合法的；否则补上完整列",
+                    severity="warning",
                 ))
             seen = set()
             for col in schema:
+                if not isinstance(col, dict):
+                    issues.append(Issue(
+                        "E_COL_SHAPE", f"job {jt} 的 schema 里有非 mapping 项：{col!r}",
+                        "每一列必须是 {columnName, dataType, nullAble} 的 mapping",
+                    ))
+                    continue
                 cn = str(col.get("columnName", ""))
                 if not UPPER_SNAKE.match(cn):
                     issues.append(Issue(

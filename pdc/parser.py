@@ -59,13 +59,27 @@ def _extract(raw: dict, index: int = 0) -> ExtractSpec:
     """
     conns = raw.get("connections") or [{}]
     conn = conns[0]
-    alias = raw.get("alias") or raw.get("templateSource") or f"UNNAMED_EXTRACT_{index}"
+    alias = (
+        raw.get("alias")
+        or raw.get("templateSource")
+        or raw.get("templateName")
+        or f"UNNAMED_EXTRACT_{index}"
+    )
     flags = conn.get("requestFlags") or {}
     return ExtractSpec(
         alias=str(alias),
         connector=str(conn.get("connector", "unknown")),
         credentials=str(conn.get("credentials", "")),
-        query=str(conn.get("query", "")),
+        # 不同 connector 的"取数位置"字段名不同：
+        #   cos/skapi/jdbc -> query    box -> file_name   部分 -> table
+        # 只认 query 会把 box 类数据源读成空路径，文档里就变成"-"。
+        query=str(
+            conn.get("query")
+            or conn.get("file_name")
+            or conn.get("table")
+            or conn.get("path")
+            or ""
+        ),
         main_df=bool(raw.get("main_df", False)),
         natural_key=tuple(str(k) for k in (conn.get("naturalKey") or ())),
         extract_type=str(raw.get("extractType", "default")),
