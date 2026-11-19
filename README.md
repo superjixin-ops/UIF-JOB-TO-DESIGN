@@ -1,53 +1,112 @@
 # Pipeline Design Copilot
 
-把 UIF pipeline YAML 变成列级血缘设计文档的 Agent。
+[![CI](https://github.com/superjixin-ops/UIF-JOB-TO-DESIGN/actions/workflows/ci.yml/badge.svg)](https://github.com/superjixin-ops/UIF-JOB-TO-DESIGN/actions/workflows/ci.yml)
 
-配套读物：`../Agent转型手册.md`
+> 读流水线配置，生成能过评审的设计文档——**但模型一行数据都不碰。**
+
+| | |
+|---|---|
+| 仓库 | [superjixin-ops/UIF-JOB-TO-DESIGN](https://github.com/superjixin-ops/UIF-JOB-TO-DESIGN) |
+| 在线演示 | `https://3eea34987613e6.app.lhr.life`（临时隧道，token `demo-token`） |
+| 规模 | **161 测试** · 33 模块 · 9,017 行 |
+| 效果 | 单文件设计文档 **4 小时 → 13 秒**；8 条真实流水线四指标全过 |
+| 技术栈 | Python 3.12 · FastAPI · asyncio · SQLite · LangGraph · MCP |
 
 ---
 
-## 它是什么
+## 60 秒看懂
 
-输入一个 pipeline 文件，输出：
+**输入**：一个数据流水线配置（YAML，几百到上千行）。
 
-1. **`{name}-design.xlsx`** — 8 张表：Overview / Source Inventory / Landing × N / Load Targets / Transform Chain / Schema Diff / Review Notes
-2. **`{name}-review.md`** — 按严重度排序的评审报告，每条带 rule id 和证据
-3. **`{name}-trace.jsonl`** — 每一轮 LLM 和工具调用的完整记录
+**输出**：
 
-在样例文件 `fact-order-fulfillment.yaml` 上的输出：**1 条 high（7 列 schema 漂移）+ 2 条 check**，耗时约 60 ms（offline 模式）。
+| 产物 | 内容 |
+|---|---|
+| `{name}-design.xlsx` | 8 张表：总览 / 数据源 / 落地表 × N / 写入目标 / 变换链 / Schema 差异 / 评审意见 |
+| `{name}-review.md` | 按严重度排序的评审报告，每条带规则引用和证据路径 |
+| `{name}-trace.jsonl` | 每一轮模型调用与工具调用的完整记录 |
 
-## 分层
+在样例上的实际输出：**1 条 high（7 列 schema 漂移）+ 2 条 check**，offline 模式 60 ms。
+
+## 为什么不是脚本
+
+因为**一份文档错一个列名就不可信**，所以系统被切成两半：
+
+| 谁做 | 做什么 | 为什么 |
+|---|---|---|
+| **代码** | 解析 YAML、数行列、比对差异、渲染 Excel、校验输出 | 结果必须可复现，模型数 100 列必错 |
+| **模型** | 决定先查什么、判断该报什么、把结论写成人话 | 需要判断力，写不出规则 |
+
+**证据**：同一输入用 SOP 模式（完全没有模型）和真实模型各跑一次，产出的 xlsx **8 张表行列数完全一致**。
+模型只改变了叙述，没改变数据。
+
+## 快速开始
+
+```bash
+git clone git@github.com:superjixin-ops/UIF-JOB-TO-DESIGN.git
+cd UIF-JOB-TO-DESIGN
+uv sync
+
+# 生成设计文档（不调模型，免费）
+uv run pdc run fact-order-fulfillment.yaml --mode offline
+
+# 开放式审计：给目录，自己决定看哪些文件（需要模型 key）
+export OPENAI_BASE_URL=https://api.deepseek.com
+export OPENAI_API_KEY=sk-...
+uv run pdc run samples/pipelines
+
+# 起服务 + 前端控制台
+./scripts/serve.sh        # http://127.0.0.1:8000
+```
+
+## 能力清单
+
+对应 AI Agent 面试的 9 个模块，逐项都有可运行的实现：
+
+| 模块 | 实现 | 一句话 |
+|---|---|---|
+| 01 基础概念 | 两个入口 | 给文件是工作流，给目录是 Agent |
+| 02 核心框架 | `agent.py` / `planner.py` / `langgraph_engine.py` | ReAct / Plan-and-Execute / 图执行，可切换对比 |
+| 03 RAG | `rag.py` / `rerank.py` / `embed.py` | BM25 + 向量 + α 调参 + 重排，有实测曲线 |
+| 04 工具调用 | `tools.py` / `mcp_client.py` / `mcp_server.py` | 7 本地工具 + MCP 远端工具 |
+| 05 记忆 | `memory.py` | 滑窗 + 摘要压缩 + JSONL 长期记忆 |
+| 06 多智能体 | `multiagent.py` | Supervisor + Worker，工具白名单隔离 |
+| 07 大模型基础 | — | 不需要代码 |
+| 08 工程化 | `routing.py` / `security.py` / `jobs.py` / `trace.py` | 路由 + 熔断 + 鉴权 + 限流 + 预算 + 异步任务 |
+| 09 Prompt | `agent.py` / `safety.py` | 结构化输出 + 注入防御 |
+
+## 项目结构
 
 ```
-接口层   CLI (pdc agent) / FastAPI (POST /runs)
-─────────────────────────────────────────────
-编排层   agent.py    ReAct 循环 + 自校验 + 预算 + trace
-─────────────────────────────────────────────
-能力层   tools.py    7 个工具（模型唯一的入口）
-         rag.py      BM25 规则检索
-         validate.py 输出校验器（确定性裁判）
-─────────────────────────────────────────────
-认知层   design.py   PipelineFacts -> DesignDoc(IR)
-         ir.py       Sheet / Finding / DesignDoc
-─────────────────────────────────────────────
-数据层   parser.py   YAML -> PipelineFacts（frozen dataclass）
-─────────────────────────────────────────────
+pdc/
+  parser.py / models.py    YAML → 不可变事实（frozen dataclass）
+  checks.py                列差异、编号连续性（纯函数）
+  ir.py / design.py        事实 → 文档结构（可单测）
+  render.py                IR → xlsx / md
+  validate.py / grounding.py / citations.py   三层校验
+  agent.py                 ReAct 循环 + 预算 + 取消
+  planner.py               Plan-and-Execute
+  multiagent.py            Supervisor + Worker
+  langgraph_engine.py      LangGraph 版本
+  tools.py                 工具注册与分发
+  mcp_server.py / mcp_client.py   MCP 两端实现
+  rag.py / rerank.py / embed.py  检索与重排
+  memory.py                记忆
+  routing.py               模型路由 + 三态熔断
+  security.py              鉴权 / 限流 / 预算
+  jobs.py                  SQLite 任务持久化
+  trace.py                 全链路追踪（含脱敏）
+  api.py / cli.py          接口层
+  ui/index.html            单文件控制台
+eval/      四指标评测 + 审计 golden set
+rag/       检索评测、α 扫描、A/B、引用分析
+tests/     161 个用例
+loadtest/  并发压测
+samples/   虚构样例数据（可公开）
+scripts/   本地启动 + 隧道
 ```
 
-**Mermaid 版**（贴到 GitHub 能直接渲染）：
-
-```mermaid
-flowchart TD
-    U[用户 / API] --> A[agent.run_agent]
-    A -->|messages + tool schemas| L[LLM]
-    L -->|tool_calls| T[tools.Toolbox]
-    T --> P[parser] & D[design] & R[rag] & V[validate]
-    T -->|observation| A
-    A -->|no tool_calls| F[最终结果]
-    T --> TR[(trace.jsonl)]
-    D --> IR[(DesignDoc IR)]
-    IR --> X[render: xlsx + md]
-```
+---
 
 ## 核心设计决策
 
@@ -60,7 +119,7 @@ flowchart TD
 | 5 | **`offline` 模式**：同一套工具，用 SOP 代替模型 | 证明工具层与模型解耦；也是对照组——SOP 能到 100%，说明模型的价值在"判断"而非"流程" |
 | 6 | **trace 落到 JSONL** | 出问题时日志没用，你要看决策链 |
 
-## RAG：检索评测（进行中）
+## RAG：检索评测
 
 ### 语料
 
@@ -872,87 +931,29 @@ GET  /files/xxx-design.xlsx         → 200，19,795 bytes
 
 ---
 
-## 快速开始
-
-```bash
-cd ~/Desktop/Agent\ Learning/pipeline-copilot
-
-# 0. 跑测试（22 个）
-~/.local/bin/uv run pytest -q
-
-# 1. 只解析，不生成
-~/.local/bin/uv run pdc parse \
-  samples/pipelines/fact-order-fulfillment.yaml --diff
-
-# 2. 确定性生成（完全不用模型）
-~/.local/bin/uv run pdc design \
-  samples/pipelines/fact-order-fulfillment.yaml
-
-# 3. 完整 Agent 循环（offline：SOP 驱动）
-~/.local/bin/uv run pdc run fact-order-fulfillment.yaml --mode offline
-
-# 4. 接真实模型
-export OPENAI_API_KEY=sk-...
-export OPENAI_BASE_URL=https://api.deepseek.com/v1      # 或任何 OpenAI 兼容网关
-~/.local/bin/uv run pdc run fact-order-fulfillment.yaml \
-  --mode auto --model deepseek-chat
-
-# 5. 评测
-~/.local/bin/uv run pdc eval
-
-# 6. 起服务
-~/.local/bin/uv run uvicorn pdc.api:app --port 8000
-```
-
 ## 当前评测结果
 
 ```
-[PASS] spend-details        sheets= 8 landings=2 findings=3  62ms
-[PASS] forecast-source      sheets= 6 landings=0 findings=1  28ms
-[PASS] forecast             sheets= 8 landings=2 findings=3  72ms
-[PASS] planning-activity    sheets=10 landings=4 findings=6  76ms
-[PASS] planning-overrides   sheets= 8 landings=2 findings=2  22ms
-[PASS] spend                sheets= 8 landings=2 findings=5  29ms
-[PASS] budget               sheets= 8 landings=2 findings=6  41ms
-[PASS] spend-details-2      sheets= 8 landings=2 findings=3  59ms
+[PASS] order-fulfillment        sheets= 8  landings=2  findings=2  grounding=1.0  56ms
+[PASS] customer-segment         sheets= 8  landings=2  findings=0  grounding=1.0  37ms
+[PASS] order-fulfillment-again  sheets= 8  landings=2  findings=2  grounding=1.0  59ms
 
-structural_rate 1.0   contract_rate 1.0   detection_rate 1.0   stability 1.0
+structural 1.0   contract 1.0   detection 1.0   grounding 1.0   stability 1.0
+weighted 1.0
 ```
 
-四个指标的含义：
+五个指标：
 
-| 指标 | 定义 | 怎么测 |
-|---|---|---|
-| structural | 文档结构完整（sheet 数、landing / load targets 存在） | 结构断言 |
-| contract | 渲染出的 xlsx 与 IR 完全一致，无公式注入 | `validate_doc` |
-| detection | 已知缺陷被检出 / 干净文件不误报 | 每个 case 的 `expect_finding` |
-| stability | 同输入两次结果一致 | 重复 case 对比 |
+| 指标 | 定义 |
+|---|---|
+| structural | 文档结构完整（sheet 数、landing / load targets 存在） |
+| contract | 渲染出的 xlsx 与 IR 完全一致，无公式注入 |
+| detection | 已知缺陷被检出 / 干净文件不误报 |
+| grounding | 结论能否被事实支持（权重最高，0.30） |
+| stability | 同输入两次结构一致 |
 
-## 目录
-
-```
-pdc/
-  models.py    frozen dataclass：Column / ExtractSpec / TransformSpec / LoadSpec / JobSpec / PipelineFacts
-  parser.py    YAML -> PipelineFacts
-  checks.py    schema_diff / dropped_and_renamed / numbering
-  ir.py        Sheet / Finding / DesignDoc
-  design.py    PipelineFacts -> DesignDoc（纯函数）
-  render.py    DesignDoc -> xlsx / md
-  validate.py  输出校验
-  rag.py       BM25 检索（零依赖实现）
-  llm.py       Protocol + OpenAI 兼容客户端 + ScriptedLLM + RuleBasedLLM
-  tools.py     7 个工具 + JSON Schema + 分发
-  agent.py     run_once / run_agent / run_with_self_check
-  trace.py     JSONL tracer
-  api.py       FastAPI
-eval/
-  cases.py     真实用例 + 人工核对过的期望
-  run.py       评测运行器 + 四指标
-tests/
-  test_parser.py   8 个（解析、真实缺陷回归）
-  test_design.py   9 个（IR、渲染、校验、注入）
-  test_agent.py    5 个（循环、工具失败、最大步数、自校验重试）
-```
+**指标全 1.0 不算证据**，所以有注入对照：`uv run pdc eval --sabotage` 会往一条 case 塞伪造结论，
+四类检查全部命中、该 case 判 FAIL、加权分掉到 0.9907。能证明它会掉分才有说服力。
 
 ## 工具清单
 
@@ -966,18 +967,19 @@ tests/
 | `write_document` | 写 | 有副作用，模型不能直接做 |
 | `validate_document` | 算 | 确定性裁判，Agent 的"后果感知" |
 
-## 已知限制（接下来的练习）
+## 已知限制
 
-| # | 限制 | 练习 | 难度 |
-|---|---|---|---|
-| 1 | `build_design` 只输出列名，不解析 SparkSql 的 SELECT 列表 | 从 SQL 抽输出列，这样没有 schema 也能推导帧结构 | ★★ |
-| 2 | `RuleBasedLLM` 的 SOP 写死，不会根据 validate 结果改策略 | 让它读取 issues 并决定重试 | ★★★ |
-| 3 | `POST /runs` 同步执行，长任务会超时 | 换 BackgroundTasks + 状态表 + 轮询 | ★★★ |
-| 4 | 没有向量检索，只有 BM25 | 加 embedding + RRF 融合，用 eval 证明提升 | ★★★★ |
-| 5 | `derive_findings` 只有 6 条规则 | 从 `.bob/skills/design-review` 把 checklist 全部转成规则 | ★★★ |
-| 6 | 没有前端 | 用 React 画 trace 时间线（你的强项） | ★★★ |
+有些是刻意不做，有些是真没解决。
 
-做完 1、5、6，这个项目就可以直接写进简历并现场演示了。
+| # | 限制 | 状态 |
+|---|---|---|
+| 1 | Plan 模式比 ReAct 贵 2.3 倍（每步都是完整会话） | **试过两种修法都无效**，结论是范式不匹配，记录在「三种执行范式」一节 |
+| 2 | `build_design` 不解析 SparkSql 的 SELECT 列表 | 真缺口：含 SparkSql 的流水线推导会失真，所以结论要人确认 |
+| 3 | 审计模式的 golden set 只有 3 条 | 够验证机制，不够度量泛化 |
+| 4 | 没有真实用户 | 个人项目天花板，只能靠时间 |
+| 5 | 单实例部署 | 没有水平扩展；SQLite 和内存限流都是单机假设 |
+
+明确不做：K8s、多租户、向量数据库（5 篇文档用不上）、微调。
 
 ## 下一步
 
