@@ -8,7 +8,7 @@
 |---|---|
 | 仓库 | [superjixin-ops/UIF-JOB-TO-DESIGN](https://github.com/superjixin-ops/UIF-JOB-TO-DESIGN) |
 | 在线演示 | `https://3eea34987613e6.app.lhr.life`（临时隧道，token `demo-token`） |
-| 规模 | **189 测试** · 36 模块 · 9,600+ 行 |
+| 规模 | **190 测试** · 37 模块 · 7,417 行主代码 + 2,413 行测试 |
 | 效果 | 设计文档 **4 小时 → 13 秒**；反向生成 **留一法 4/4 通过**，平均 1.6 轮、约 $0.015 一条 |
 | 技术栈 | Python 3.12 · FastAPI · asyncio · SQLite · LangGraph · MCP |
 
@@ -147,7 +147,7 @@ pdc/
   ui/index.html            单文件控制台
 eval/      四指标评测 + 审计 golden set + 反向生成留一法评测
 rag/       检索评测、α 扫描、A/B、引用分析
-tests/     189 个用例
+tests/     190 个用例
 loadtest/  并发压测
 samples/   虚构样例数据（可公开）
 scripts/   本地启动 + 隧道
