@@ -82,7 +82,7 @@ pass_rate 1.00 · avg_rounds 2.00 · exact_match 0.00（没有抄）
 连接级键值：源 143 个，缺/不同 0 个
 ```
 
-完整记录见 [`../设计转YAML-Agent-幻觉与测试治理.md`](../设计转YAML-Agent-幻觉与测试治理.md)。
+完整记录见 [`docs/hallucination-and-testing.md`](docs/hallucination-and-testing.md)（11 个真实问题 + 12 个阶段的全过程）。
 
 ## 为什么不是脚本
 
