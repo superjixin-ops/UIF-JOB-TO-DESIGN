@@ -1,11 +1,13 @@
+# 构建上下文排除项
+# 注意：不要排除 *.md —— pyproject.toml 里 readme = "README.md"，
+# 构建项目时 hatchling 需要这个文件，缺了会直接失败（CI 踩过）。
 .venv
 out
 .git
+.github
 .pytest_cache
 __pycache__
 *.pyc
 tests
 loadtest
 rag
-out
-*.md
