@@ -86,13 +86,37 @@ def _load_memory(session_id: str, out_dir: Path):
 def _goal_with_memory(target: str, memory) -> str:
     if memory is None:
         return ""
+
+    from pdc.memory import recall
+
+    parts: list[str] = []
     ctx = memory.context()
-    if not ctx:
+    if ctx:
+        parts.append(ctx)
+
+    # 跨会话召回：单线程 CLI，可以放心加载向量模型。
+    # API 里没这么做——多 worker 各加载一份模型不划算，见 docs/memory-design.md。
+    hits: list[dict] = []
+    try:
+        from pdc.embed import get_embedder
+
+        hits = recall(memory.store, target, top_k=4, embedder=get_embedder(),
+                      same_session=memory.session_id)
+    except Exception:  # noqa: BLE001 - 向量不可用就退化成词面
+        hits = recall(memory.store, target, top_k=4, same_session=memory.session_id)
+
+    other = [h for h in hits if h["session"] != memory.session_id]
+    if other:
+        lines = [f"- [{h['session']}] {h['content'][:200]}" for h in other]
+        parts.append("[跨会话相关记忆]\n" + "\n".join(lines))
+        print(f"[memory] 召回 {len(other)} 条跨会话记忆")
+
+    if not parts:
         return ""
     return (
-        "以下是这个会话之前的内容，仅作背景参考，不要重复已经做过的事：\n"
-        f"{ctx}\n\n"
-        f"现在为 `{target}` 生成设计文档。"
+        "以下是历史内容，仅作背景参考，不要重复已经做过的事：\n"
+        + "\n\n".join(parts)
+        + f"\n\n现在为 `{target}` 生成设计文档。"
     )
 
 
@@ -407,6 +431,34 @@ def cmd_bench(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_memory(args: argparse.Namespace) -> int:
+    from pdc.memory import SessionStore, recall
+
+    store = SessionStore(Path(args.dir))
+    if args.action == "list":
+        print(json.dumps({"sessions": store.list_sessions()}, ensure_ascii=False, indent=2))
+        return 0
+
+    embedder = None
+    if not args.no_vector:
+        try:
+            from pdc.embed import get_embedder
+
+            embedder = get_embedder()
+        except Exception:  # noqa: BLE001
+            print("[memory] 向量不可用，退化为词面检索", file=sys.stderr)
+
+    hits = recall(store, args.query, top_k=args.top, embedder=embedder)
+    if not hits:
+        print("没有命中。")
+        return 0
+    for i, h in enumerate(hits, 1):
+        print(f"{i}. [{h['session']}] score={h['score']} "
+              f"(词面 {h['lexical']}, 向量 {h['vector']}, 新近 {h['recency']})")
+        print(f"   {h['content'][:160]}")
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """检查配置：一次报全部问题，而不是启动后逐个撞。"""
     from pdc.config import ConfigError, Settings
@@ -551,6 +603,14 @@ def main(argv: list[str] | None = None) -> int:
     be.add_argument("--sizes", default="1000,10000,100000")
     be.add_argument("--queries", type=int, default=20)
     be.set_defaults(func=cmd_bench)
+
+    mem = sub.add_parser("memory", help="长期记忆：列出会话 / 检索")
+    mem.add_argument("action", choices=["list", "search"], nargs="?", default="list")
+    mem.add_argument("query", nargs="?", default="")
+    mem.add_argument("--dir", default="out/memory")
+    mem.add_argument("--top", type=int, default=5)
+    mem.add_argument("--no-vector", action="store_true")
+    mem.set_defaults(func=cmd_memory)
 
     doc = sub.add_parser("doctor", help="检查配置（不启动服务）")
     doc.set_defaults(func=cmd_doctor)

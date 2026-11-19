@@ -8,7 +8,7 @@
 |---|---|
 | 仓库 | [superjixin-ops/UIF-JOB-TO-DESIGN](https://github.com/superjixin-ops/UIF-JOB-TO-DESIGN) |
 | 在线演示 | `https://3eea34987613e6.app.lhr.life`（临时隧道，token `demo-token`） |
-| 规模 | **239 测试** · 45 模块 · 9,366 行主代码 + 3,144 行测试 |
+| 规模 | **244 测试** · 45 模块 · 9,533 行主代码 + 3,227 行测试 |
 | 效果 | 设计文档 **4 小时 → 13 秒**；反向生成 **留一法 4/4 通过**，平均 2 轮、约 $0.02 一条；143 个键值与源文件零差异 |
 | 技术栈 | Python 3.12 · FastAPI · asyncio · SQLite · LangGraph · MCP |
 
@@ -136,7 +136,7 @@ uv run pdc run samples/pipelines
 | 02 核心框架 | `agent.py` / `planner.py` / `langgraph_engine.py` | ReAct / Plan-and-Execute / 图执行，可切换对比 |
 | 03 RAG | `rag.py` / `rerank.py` / `embed.py` | BM25 + 向量 + α 调参 + 重排，有实测曲线 |
 | 04 工具调用 | `tools.py` / `mcp_client.py` / `mcp_server.py` | 7 本地工具 + MCP 远端工具 |
-| 05 记忆 | `memory.py` | 滑窗 + 摘要压缩 + JSONL 长期记忆 |
+| 05 记忆 | `memory.py` | 滑窗 + 摘要压缩 + JSONL + **四路信号检索** |
 | 06 多智能体 | `multiagent.py` | Supervisor + Worker，工具白名单隔离 |
 | 07 大模型基础 | — | 不需要代码 |
 | 08 工程化 | `routing.py` / `security.py` / `jobs.py` / `trace.py` | 路由 + 熔断 + 鉴权 + 限流 + 预算 + 异步任务 |
@@ -174,7 +174,7 @@ pdc/
 ops/       告警规则 + 检查脚本
 eval/      四指标评测 + 审计 golden set + 反向生成留一法 + 逐键保真审计
 rag/       检索评测（样例语料可复现）、α 扫描、A/B、引用分析
-tests/     239 个用例
+tests/     244 个用例
 loadtest/  并发压测
 samples/   虚构样例数据（可公开）
 scripts/   本地启动 + 隧道 + 语料结构统计
@@ -418,6 +418,33 @@ uv run pdc bench --index out/index --sizes 1000,10000,100000
 **已知限制**：卡片是英文（YAML 标识符），`bge-small-zh` 跨语言能力弱。
 中文查询靠一个 24 词的小词表补英文，能命中但不够好。
 正式做法是换多语模型：`PDC_EMBED_MODEL=intfloat/multilingual-e5-small`。
+
+## 记忆检索
+
+四层记忆：工作 / 短期滑窗 / 摘要压缩 / **长期检索**。
+
+```bash
+pdc memory list
+pdc memory search "schema drift 怎么处理" --top 3
+```
+
+召回用四路信号加权：
+
+```
+score = 0.45 词面 + 0.35 向量 + 0.15 时间衰减 + 0.05 同会话加成
+```
+
+| 信号 | 补什么 | 为什么权重这么定 |
+|---|---|---|
+| 词面 | 专有名词（`SK_ORDER_DATE`） | embedding 对低频 token 弱 |
+| 向量 | 同义表达（"漂移" / "对不上"） | 词面会漏 |
+| 时间衰减 | 旧结论可能过期 | 半衰期 7 天 |
+| 同会话 | 同一任务线更相关 | 只做 tie-breaker |
+
+**没有加"重要性"**：拿不到可信信号，加一路噪音不如不加。
+
+API 只用词面 + 衰减（多 worker 各加载一份模型不划算），CLI 用完整四路。
+这是取舍，不是漏做。设计见 [`docs/memory-design.md`](docs/memory-design.md)。
 
 ## 企业级能力
 

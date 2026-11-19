@@ -208,33 +208,111 @@ def _tokens(text: str) -> set[str]:
     return {t for t in out if len(t) > 1}
 
 
-def recall(store: SessionStore, query: str, top_k: int = 3) -> list[dict]:
-    """在历史会话里按词面重合度检索。零依赖，够用。
+def recall(
+    store: SessionStore,
+    query: str,
+    top_k: int = 3,
+    *,
+    embedder=None,
+    now: float | None = None,
+    half_life_days: float = 7.0,
+    min_score: float = 0.15,
+    same_session: str = "",
+    weights: tuple[float, float, float, float] = (0.45, 0.35, 0.15, 0.05),
+) -> list[dict]:
+    """跨会话检索历史记忆，四路信号加权。
 
-    为什么不上向量：历史会话的写法高度重复（都是同一个人的技术讨论），
-    词面匹配已经够；等出现"同义不同词"的漏检再加向量。
+    为什么不是纯词面：
+        历史会话里同一个结论会换着说法出现（"schema 漂移" / "列对不上"），
+        词面匹配会漏。加一路向量补语义。
+
+    为什么不是纯向量：
+        向量对专有名词不敏感（`SK_ORDER_DATE` 这种 token 在模型词表里很弱），
+        而这类词恰恰是技术讨论里最关键的。两路互补。
+
+    为什么加时间衰减：
+        三个月前的结论可能已经过期。半衰期默认 7 天：
+        一周前的记忆权重 0.5，两周前 0.25。
+
+    为什么没有"重要性"：
+        生成式 Agent 的经典做法是 recency + importance + relevance，
+        但 importance 需要额外标注或模型打分。没有可信信号时不编一个——
+        少一路信号，比加一路噪音好。
     """
-    q = _tokens(query)
-    if not q:
+    query_tokens = _tokens(query)
+    if not query_tokens:
         return []
 
-    scored: list[tuple[float, str, Turn]] = []
+    candidates: list[tuple[str, Turn]] = []
     for sid in store.list_sessions():
         for turn in store.load(sid):
-            t = _tokens(turn.content)
-            if not t:
-                continue
-            overlap = len(q & t) / len(q)
-            if overlap > 0:
-                scored.append((overlap, sid, turn))
+            if turn.content.strip():
+                candidates.append((sid, turn))
+    if not candidates:
+        return []
 
-    scored.sort(key=lambda x: -x[0])
-    return [
-        {
-            "session": sid,
-            "role": turn.role,
-            "content": turn.content[:400],
-            "score": round(score, 3),
-        }
-        for score, sid, turn in scored[:top_k]
-    ]
+    # 词面分：query 的词有多少出现在这条记忆里
+    lex = [len(query_tokens & _tokens(t.content)) / len(query_tokens) for _, t in candidates]
+
+    # 向量分：embedder 不可用时整路降级，不阻断
+    vec: list[float] | None = None
+    if embedder is not None:
+        try:
+            import numpy as np
+
+            texts = [query] + [t.content[:2000] for _, t in candidates]
+            matrix = embedder.encode(texts)
+            qv = matrix[0]
+            docs = matrix[1:]
+            norm = np.linalg.norm(docs, axis=1) * (np.linalg.norm(qv) or 1.0)
+            vec = [float(x) for x in (docs @ qv) / np.clip(norm, 1e-9, None)]
+        except Exception:  # noqa: BLE001 - 向量不可用就降级
+            vec = None
+
+    current = now if now is not None else time.time()
+    w_lex, w_vec, w_rec, w_same = weights
+    if vec is None:
+        # 没有向量就把它的权重按比例分给词面和衰减，避免整体分数被压低
+        total = w_lex + w_rec + w_same
+        w_lex, w_rec, w_same = w_lex / total, w_rec / total, w_same / total
+        w_vec = 0.0
+
+    scored: list[dict] = []
+    for i, (sid, turn) in enumerate(candidates):
+        age_days = max(0.0, (current - turn.ts) / 86400)
+        rec = 0.5 ** (age_days / half_life_days) if half_life_days > 0 else 1.0
+        score = (
+            w_lex * lex[i]
+            + w_vec * (vec[i] if vec else 0.0)
+            + w_rec * rec
+            + w_same * (1.0 if same_session and sid == same_session else 0.0)
+        )
+        if score < min_score:
+            continue
+        scored.append(
+            {
+                "session": sid,
+                "role": turn.role,
+                "content": turn.content[:400],
+                "ts": turn.ts,
+                "score": round(score, 4),
+                "lexical": round(lex[i], 3),
+                "vector": round(vec[i], 3) if vec else None,
+                "recency": round(rec, 3),
+            }
+        )
+
+    scored.sort(key=lambda x: -x["score"])
+
+    # 去重：同一个结论被写进多个会话时，只留分最高的那条
+    out: list[dict] = []
+    seen: set[str] = set()
+    for hit in scored:
+        key = "".join(ch for ch in hit["content"].lower() if ch.isalnum())[:120]
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(hit)
+        if len(out) >= top_k:
+            break
+    return out

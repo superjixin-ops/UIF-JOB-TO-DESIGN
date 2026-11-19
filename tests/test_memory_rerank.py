@@ -150,3 +150,86 @@ def test_score_is_bounded():
     c = {"id": "x", "heading": "a b", "text": "a b c", "score": 0.5}
     s = score("a b c", c)
     assert 0.0 <= s <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# 跨会话记忆检索：四路信号
+# ---------------------------------------------------------------------------
+class _FakeEmbedder:
+    """按关键词给固定方向，用来证明向量信号真的参与了排序。"""
+
+    name = "fake"
+    dim = 2
+
+    def encode(self, texts):
+        import numpy as np
+
+        out = []
+        for text in texts:
+            if text.strip() in {"alpha", "beta"}:
+                out.append([1.0, 0.0])
+            elif "gamma" in text:
+                out.append([0.0, 1.0])
+            else:
+                out.append([0.5, 0.5])
+        return np.array(out, dtype=np.float32)
+
+
+def test_recall_vector_breaks_a_tie(tmp_path):
+    """词面完全打平的时候，向量决定顺序。
+
+    构造：query 是 alpha，两条记忆分别是 beta 和 gamma，词面重合都是 0。
+    没有向量时两者同分（只靠时间衰减），顺序等于插入顺序；
+    加向量后 beta 应该排第一。这证明向量那一路真的参与了计算。
+    """
+    store = SessionStore(tmp_path)
+    store.append("s1", Turn("user", "beta", ts=1000))
+    store.append("s2", Turn("user", "gamma", ts=1000))
+
+    without = recall(store, "alpha", top_k=2, now=1000, min_score=0)
+    assert [h["content"] for h in without] == ["beta", "gamma"]
+
+    with_vector = recall(
+        store, "alpha", top_k=2, embedder=_FakeEmbedder(), now=1000, min_score=0
+    )
+    assert with_vector[0]["content"] == "beta"
+    assert with_vector[0]["vector"] == 1.0
+
+
+def test_recall_dedups_and_prefers_newer(tmp_path):
+    """同一句话在两个会话里出现，只留一条，而且留新的那条。"""
+    store = SessionStore(tmp_path)
+    store.append("old", Turn("user", "schema drift check", ts=100))
+    store.append("new", Turn("user", "schema drift check", ts=900))
+
+    hits = recall(store, "schema drift", top_k=5, now=1000, min_score=0)
+    assert len(hits) == 1
+    assert hits[0]["session"] == "new"
+
+
+def test_recall_decays_with_age(tmp_path):
+    store = SessionStore(tmp_path)
+    store.append("s", Turn("user", "schema drift check", ts=0))
+    fresh = recall(store, "schema drift", now=0, min_score=0)[0]["recency"]
+    stale = recall(store, "schema drift", now=30 * 86400, min_score=0)[0]["recency"]
+    assert fresh > stale
+
+
+def test_recall_min_score_filters_noise(tmp_path):
+    store = SessionStore(tmp_path)
+    store.append("s", Turn("user", "完全不相关的闲聊", ts=0))
+    assert recall(store, "schema drift", now=60 * 86400, min_score=0.15) == []
+
+
+def test_recall_degrades_when_embedder_raises(tmp_path):
+    class Broken:
+        name = "broken"
+        dim = 2
+
+        def encode(self, texts):
+            raise RuntimeError("model not found")
+
+    store = SessionStore(tmp_path)
+    store.append("s", Turn("user", "schema drift check", ts=1000))
+    hits = recall(store, "schema drift", embedder=Broken(), now=1000, min_score=0)
+    assert hits and hits[0]["vector"] is None
