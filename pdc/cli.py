@@ -260,6 +260,24 @@ def cmd_agent(args: argparse.Namespace) -> int:
         )
         print(f"[engine=graph] 节点步数 {g['steps']}，消息 {len(g['messages'])} 条")
 
+    elif engine == "langchain":
+        from pdc.langchain_engine import run_langchain
+
+        lc = run_langchain(
+            toolbox, goal, model=args.model or "deepseek-chat", max_steps=args.max_steps
+        )
+        result = SimpleNamespace(
+            output=lc["output"],
+            steps=lc["steps"],
+            written={},
+            issues=[],
+        )
+        stats = toolbox.tracer.stats()
+        print(
+            f"[engine=langchain] 工具调用 {lc['tool_calls']} 次，消息 {lc['steps']} 条，"
+            f"llm {stats.get('llm_calls', 0)} 次 / {stats.get('tokens_in', 0) + stats.get('tokens_out', 0):,} tok"
+        )
+
     elif engine == "multi":
         from pdc.multiagent import run_multi
 
@@ -391,6 +409,7 @@ def cmd_index(args: argparse.Namespace) -> int:
             backend=args.backend,
             offline_embed=args.offline,
             limit=args.limit or None,
+            dsn=args.dsn,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         print(
@@ -405,6 +424,7 @@ def cmd_index(args: argparse.Namespace) -> int:
         backend=args.backend,
         offline_embed=args.offline,
         limit=args.limit or None,
+        dsn=args.dsn,
     )
     print(json.dumps(meta, ensure_ascii=False, indent=2))
     print(f"\n下一步: uv run pdc search \"订单履约\" --index {args.out}")
@@ -419,7 +439,14 @@ def cmd_search(args: argparse.Namespace) -> int:
         if "=" in item:
             k, v = item.split("=", 1)
             where[k] = v
-    hits = search(args.index, args.query, k=args.top_k, where=where or None, offline_embed=args.offline)
+    hits = search(
+        args.index,
+        args.query,
+        k=args.top_k,
+        where=where or None,
+        offline_embed=args.offline,
+        dsn=args.dsn,
+    )
     if not hits:
         print("没有命中。")
         return 0
@@ -572,8 +599,10 @@ def main(argv: list[str] | None = None) -> int:
         help='连接 MCP server，例如 --mcp "python -m pdc.mcp_server"',
     )
     a.add_argument(
-        "--engine", choices=["react", "plan", "multi", "graph"], default="react",
-        help="执行范式：react / plan / multi / graph（LangGraph）",
+        "--engine",
+        choices=["react", "plan", "multi", "graph", "langchain"],
+        default="react",
+        help="执行范式：react / plan / multi / graph（LangGraph）/ langchain",
     )
     a.add_argument(
         "--session", default="",
@@ -601,7 +630,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="build=全量重建；update=只处理新增/变更/删除")
     ix.add_argument("--repo", default="samples/pipelines")
     ix.add_argument("--out", default="out/index")
-    ix.add_argument("--backend", choices=["numpy", "sqlite-vec"], default="numpy")
+    ix.add_argument("--backend", choices=["numpy", "sqlite-vec", "pgvector"], default="numpy")
+    ix.add_argument("--dsn", default="", help="pgvector 的 Postgres DSN；也可用 PDC_PGVECTOR_DSN")
     ix.add_argument("--limit", type=int, default=0)
     ix.add_argument("--offline", action="store_true", help="用哈希向量，不下载模型")
     ix.set_defaults(func=cmd_index)
@@ -612,6 +642,7 @@ def main(argv: list[str] | None = None) -> int:
     se.add_argument("-k", "--top-k", type=int, default=5)
     se.add_argument("--where", action="append", help="过滤，例如 --where chain=eid")
     se.add_argument("--offline", action="store_true")
+    se.add_argument("--dsn", default="", help="pgvector 的 Postgres DSN")
     se.set_defaults(func=cmd_search)
 
     be = sub.add_parser("bench", help="比 numpy 与 sqlite-vec 的构建/查询成本")

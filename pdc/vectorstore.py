@@ -14,6 +14,8 @@
     numpy        暴力扫描。10 万条 512 维大约几十毫秒，够用。
     sqlite-vec   真·向量库（SQLite 扩展），支持持久化、增量写、分区过滤。
                  单文件，不引入新服务——保住现在的部署形态。
+    pgvector     已经有 Postgres 时的选择。一个库同时存业务数据和向量，
+                 支持 HNSW 索引和多实例共享。
 
 注意：sqlite-vec 的元数据过滤只支持 partition key。
 所以这里把 chain 设成分区键（最常用的过滤维度），其余字段放 meta。
@@ -151,6 +153,11 @@ class SqliteVecStore:
                 break
         return out
 
+    def reset(self) -> None:
+        """全量重建时清空。TRUNCATE 比 DELETE 快，且重置自增序列。"""
+        with self._conn.cursor() as cur:
+            cur.execute(f"TRUNCATE {self.table}")
+
     def delete(self, ids: list[str]) -> int:
         if not ids:
             return 0
@@ -161,6 +168,118 @@ class SqliteVecStore:
 
     def count(self) -> int:
         return int(self._conn.execute("SELECT count(*) FROM items").fetchone()[0])
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+def _vec_literal(vector: np.ndarray) -> str:
+    """pgvector 接受的文本格式：[0.1,0.2,...]。
+
+    不用 psycopg 的 list 适配器：它会把 list 映射成 float[]，
+    再加 ::vector 转换也能用，但多一层隐式转换，报错信息更难懂。
+    """
+    arr = np.asarray(vector, dtype=np.float32).reshape(-1)
+    return "[" + ",".join(f"{x:.6f}" for x in arr) + "]"
+
+
+class PgVectorStore:
+    """pgvector：Postgres 扩展，适合"已经有 PG"的环境。
+
+    和 sqlite-vec 的取舍：
+
+        sqlite-vec   零服务、单文件、适合单机
+        pgvector     多实例共享、和业务表同库、支持 HNSW + 复杂过滤
+
+    什么时候该换：多副本部署、需要按用户/租户过滤、需要事务里同时写向量和业务数据。
+    """
+
+    name = "pgvector"
+
+    def __init__(self, dsn: str, dim: int, table: str = "pdc_vectors") -> None:
+        import re
+
+        import psycopg
+
+        if not re.fullmatch(r"[a-z_][a-z0-9_]*", table):
+            raise ValueError(f"非法表名: {table!r}")
+        self.dsn = dsn
+        self.dim = int(dim)
+        self.table = table
+        self._conn = psycopg.connect(dsn, connect_timeout=10)
+        self._conn.autocommit = True
+        with self._conn.cursor() as cur:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            cur.execute(
+                f"""CREATE TABLE IF NOT EXISTS {table} (
+                    id TEXT PRIMARY KEY,
+                    embedding vector({self.dim}),
+                    chain TEXT NOT NULL DEFAULT '',
+                    meta JSONB NOT NULL DEFAULT '{{}}'
+                )"""
+            )
+            # HNSW：近似最近邻。数据量小时可以不加，但加了才有"向量库"的意义。
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS {table}_hnsw "
+                f"ON {table} USING hnsw (embedding vector_cosine_ops)"
+            )
+
+    def add(self, items: list[tuple[str, np.ndarray, dict]]) -> None:
+        rows = [
+            (str(i), _vec_literal(v), str(m.get("chain", "")), json.dumps(m, ensure_ascii=False))
+            for i, v, m in items
+        ]
+        with self._conn.cursor() as cur:
+            cur.executemany(
+                f"""INSERT INTO {self.table}(id, embedding, chain, meta)
+                    VALUES (%s, %s::vector, %s, %s::jsonb)
+                    ON CONFLICT (id) DO UPDATE SET
+                        embedding = EXCLUDED.embedding,
+                        chain = EXCLUDED.chain,
+                        meta = EXCLUDED.meta""",
+                rows,
+            )
+
+    def search(self, vector: np.ndarray, k: int = 5, where: dict | None = None) -> list[Hit]:
+        lit = _vec_literal(vector)
+        sql = (
+            f"SELECT id, 1 - (embedding <=> %s::vector) AS score, meta "
+            f"FROM {self.table}"
+        )
+        params: list = [lit]
+        if where and "chain" in where:
+            sql += " WHERE chain = %s"
+            params.append(str(where["chain"]))
+        sql += " ORDER BY embedding <=> %s::vector LIMIT %s"
+        params.extend([lit, k])
+
+        with self._conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        out: list[Hit] = []
+        for item_id, score, meta in rows:
+            data = meta if isinstance(meta, dict) else json.loads(meta)
+            if where and any(data.get(key) != value for key, value in where.items()):
+                continue
+            out.append(Hit(str(item_id), float(score), data))
+        return out
+
+    def reset(self) -> None:
+        """全量重建时清空。TRUNCATE 比 DELETE 快，且重置自增序列。"""
+        with self._conn.cursor() as cur:
+            cur.execute(f"TRUNCATE {self.table}")
+
+    def delete(self, ids: list[str]) -> int:
+        if not ids:
+            return 0
+        with self._conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {self.table} WHERE id = ANY(%s)", (ids,))
+            return int(cur.rowcount or 0)
+
+    def count(self) -> int:
+        with self._conn.cursor() as cur:
+            cur.execute(f"SELECT count(*) FROM {self.table}")
+            return int(cur.fetchone()[0])
 
     def close(self) -> None:
         self._conn.close()

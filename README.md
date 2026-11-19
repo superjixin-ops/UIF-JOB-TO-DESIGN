@@ -8,9 +8,9 @@
 |---|---|
 | 仓库 | [superjixin-ops/UIF-JOB-TO-DESIGN](https://github.com/superjixin-ops/UIF-JOB-TO-DESIGN) |
 | 在线演示 | `https://3eea34987613e6.app.lhr.life`（临时隧道，token `demo-token`） |
-| 规模 | **251 测试** · 45 模块 · 9,799 行主代码 + 3,363 行测试 |
+| 规模 | **255 测试** · 46 模块 · 10,235 行主代码 + 3,447 行测试 |
 | 效果 | 设计文档 **4 小时 → 13 秒**；反向生成 **留一法 4/4 通过**，平均 2 轮、约 $0.02 一条；143 个键值与源文件零差异 |
-| 技术栈 | Python 3.12 · FastAPI · asyncio · SQLite · LangGraph · MCP |
+| 技术栈 | Python 3.12 · FastAPI · asyncio · SQLite · LangGraph · LangChain · MCP · pgvector |
 
 ---
 
@@ -133,7 +133,7 @@ uv run pdc run samples/pipelines
 | 模块 | 实现 | 一句话 |
 |---|---|---|
 | 01 基础概念 | 两个入口 + 两个方向 | 给文件是工作流，给目录是 Agent；build 是产物由模型写 |
-| 02 核心框架 | `agent.py` / `planner.py` / `langgraph_engine.py` | ReAct / Plan-and-Execute / 图执行，可切换对比 |
+| 02 核心框架 | `agent.py` / `planner.py` / `langgraph_engine.py` / `langchain_engine.py` | 五个引擎：ReAct / Plan / 多 Agent / LangGraph / LangChain |
 | 03 RAG | `rag.py` / `rerank.py` / `embed.py` | BM25 + 向量 + α 调参 + 重排，有实测曲线 |
 | 04 工具调用 | `tools.py` / `mcp_client.py` / `mcp_server.py` | 7 本地工具 + MCP 远端工具 |
 | 05 记忆 | `memory.py` | 滑窗 + 摘要压缩 + JSONL + **四路信号检索** |
@@ -156,6 +156,7 @@ pdc/
   planner.py               Plan-and-Execute
   multiagent.py            Supervisor + Worker
   langgraph_engine.py      LangGraph 版本
+  langchain_engine.py      LangChain create_agent 版本
   tools.py                 工具注册与分发
   mcp_server.py / mcp_client.py   MCP 两端实现
   rag.py / rerank.py / embed.py  检索与重排
@@ -174,7 +175,7 @@ pdc/
 ops/       告警规则 + 检查脚本
 eval/      四指标评测 + 审计 golden set + 反向生成留一法 + 逐键保真审计
 rag/       检索评测（样例语料可复现）、α 扫描、A/B、引用分析
-tests/     251 个用例
+tests/     255 个用例
 loadtest/  并发压测
 samples/   虚构样例数据（可公开）
 scripts/   本地启动 + 隧道 + 语料结构统计
@@ -193,6 +194,7 @@ scripts/   本地启动 + 隧道 + 语料结构统计
 | [`docs/enterprise-readiness.md`](docs/enterprise-readiness.md) | 七个维度、为什么不做多租户/HA |
 | [`docs/api-and-ui.md`](docs/api-and-ui.md) | FastAPI、异步、SSE、加第三种任务 |
 | [`docs/learning-path.md`](docs/learning-path.md) | 从零到面试的 10 周流程 + 30 个基础追问 |
+| [`docs/engines-and-backends.md`](docs/engines-and-backends.md) | 五个引擎、三个向量后端的取舍与实测 |
 
 ## 核心设计决策
 
@@ -404,6 +406,11 @@ uv run pdc index build --repo samples/pipelines --out out/index --backend numpy
 # 换 sqlite-vec（单文件、可增量、支持分区过滤）
 uv run pdc index build --repo samples/pipelines --out out/index --backend sqlite-vec
 
+# 换 pgvector（需要 Postgres；一条命令起一个带扩展的实例）
+docker compose -f docker-compose.pg.yml up -d
+export PDC_PGVECTOR_DSN="postgresql://postgres:pdc@localhost:5433/pdc"
+uv run pdc index build --repo samples/pipelines --out out/index-pg --backend pgvector
+
 # 增量更新：只 embed 新增/变更的条目
 uv run pdc index update --repo samples/pipelines --out out/index
 
@@ -438,7 +445,8 @@ uv run pdc bench --index out/index --sizes 1000,10000,100000
 判定"变了"用卡片文本而不是文件 mtime（checkout 会让 mtime 变、内容没变）。
 
 所以向量库在这里的价值是**持久化 / 增量更新 / 分区过滤**，不是速度。
-默认仍然用 numpy；sqlite-vec 是可选后端。
+默认仍然用 numpy；sqlite-vec / pgvector 是可选后端。
+三个后端的取舍见 [`docs/engines-and-backends.md`](docs/engines-and-backends.md)。
 
 **已知限制**：卡片是英文（YAML 标识符），`bge-small-zh` 跨语言能力弱。
 中文查询靠一个 24 词的小词表补英文，能命中但不够好。

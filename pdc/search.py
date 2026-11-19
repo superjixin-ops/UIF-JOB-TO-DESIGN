@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import os
 import statistics
 import time
 from pathlib import Path
@@ -21,7 +22,7 @@ import numpy as np
 
 from pdc.corpus_index import build_cards, read_cards, write_cards
 from pdc.embed import get_embedder
-from pdc.vectorstore import Hit, JsonlStore, NumpyStore, SqliteVecStore
+from pdc.vectorstore import Hit, JsonlStore, NumpyStore, PgVectorStore, SqliteVecStore
 
 META = "meta.json"
 
@@ -73,6 +74,7 @@ def build(
     backend: str = "numpy",
     offline_embed: bool = False,
     limit: int | None = None,
+    dsn: str = "",
 ) -> dict:
     out_dir = Path(out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -91,6 +93,14 @@ def build(
         db = out_dir / "index.db"
         db.unlink(missing_ok=True)
         store = SqliteVecStore(db, dim=int(vectors.shape[1]))
+        store.add(list(zip(ids, vectors, metas, strict=True)))
+        store.close()
+    elif backend == "pgvector":
+        conn = dsn or os.getenv("PDC_PGVECTOR_DSN", "")
+        if not conn:
+            raise SystemExit("pgvector 需要 --dsn 或环境变量 PDC_PGVECTOR_DSN")
+        store = PgVectorStore(conn, dim=int(vectors.shape[1]))
+        store.reset()  # 全量重建：清空旧数据
         store.add(list(zip(ids, vectors, metas, strict=True)))
         store.close()
     elif backend == "numpy":
@@ -116,6 +126,7 @@ def update(
     backend: str = "",
     offline_embed: bool = False,
     limit: int | None = None,
+    dsn: str = "",
 ) -> dict:
     """增量更新索引：只 embed 新增和变更的条目。
 
@@ -159,7 +170,17 @@ def update(
     # 卡片文件先整体重写：它只是展示用，重建成本可以忽略
     write_cards(list(new.values()), d / "cards.jsonl")
 
-    if backend == "sqlite-vec":
+    if backend == "pgvector":
+        conn = dsn or os.getenv("PDC_PGVECTOR_DSN", "")
+        if not conn:
+            raise SystemExit("pgvector 需要 --dsn 或环境变量 PDC_PGVECTOR_DSN")
+        store = PgVectorStore(conn, dim=meta["dim"])
+        store.delete(removed)
+        if to_embed:
+            store.add([(i, vectors[k], new[i].meta) for k, i in enumerate(to_embed)])
+        count = store.count()
+        store.close()
+    elif backend == "sqlite-vec":
         store = SqliteVecStore(d / "index.db", dim=meta["dim"])
         store.delete(removed)
         if to_embed:
@@ -198,7 +219,7 @@ def update(
     }
 
 
-def load_store(index_dir: str | Path):
+def load_store(index_dir: str | Path, dsn: str = ""):
     d = Path(index_dir)
     meta_path = d / META
     if not meta_path.exists():
@@ -206,6 +227,11 @@ def load_store(index_dir: str | Path):
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     if meta["backend"] == "sqlite-vec":
         store = SqliteVecStore(d / "index.db", dim=meta["dim"])
+    elif meta["backend"] == "pgvector":
+        conn = dsn or os.getenv("PDC_PGVECTOR_DSN", "")
+        if not conn:
+            raise SystemExit("这个索引用的是 pgvector，需要 --dsn 或 PDC_PGVECTOR_DSN")
+        store = PgVectorStore(conn, dim=meta["dim"])
     else:
         store = JsonlStore(d).load()
     return store, meta
@@ -218,8 +244,9 @@ def search(
     k: int = 5,
     where: dict | None = None,
     offline_embed: bool = False,
+    dsn: str = "",
 ) -> list[Hit]:
-    store, _meta = load_store(index_dir)
+    store, _meta = load_store(index_dir, dsn=dsn)
     embedder = get_embedder(offline=offline_embed)
     vector = embedder.encode([expand_query(query)])[0]
     return store.search(vector, k=k, where=where)
