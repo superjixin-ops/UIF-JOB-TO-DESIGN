@@ -26,12 +26,41 @@ jobs:
         run: uv run ruff check pdc
 
       - name: Test
-        # 依赖本机 CRD 仓库的用例会自动 skip，所以 CI 上也能过
         run: uv run pytest -q
 
   docker:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Build image
-        run: docker build -t pipeline-copilot:ci .
+        # 把完整输出写进 build.log：失败时下一步会把它贴到 job summary，
+        # 这样没有 admin 权限的人也能在 check run 里看到错误原因。
+        run: |
+          set -o pipefail
+          docker build -t pipeline-copilot:ci . 2>&1 | tee build.log
+
+      - name: Surface build error
+        if: failure()
+        run: |
+          {
+            echo '### docker build failed'
+            echo '```'
+            tail -50 build.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Smoke test image
+        run: |
+          docker run -d --name pdc-ci -p 8000:8000 pipeline-copilot:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/health > /dev/null; then
+              echo "health ok"
+              curl -fsS http://127.0.0.1:8000/health
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "容器启动失败，日志："
+          docker logs pdc-ci
+          exit 1
