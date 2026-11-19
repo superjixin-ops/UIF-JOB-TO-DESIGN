@@ -467,7 +467,21 @@ def run_build(
     budget: int | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> BuildResult:
-    """生成循环。终止条件只有一个：validate_yaml 通过 + finish 被接受。"""
+    """生成循环。终止条件只有一个：validate_yaml 通过 + finish 被接受。
+
+    设计原则：
+
+        1. **门禁在循环里，不在循环外。** `finish` 会重新跑一次校验，
+           所以"模型说完成"永远不是终止条件——校验通过才是。
+           如果把校验放在循环结束后，模型中途说"完成了"就再也拉不回来。
+        2. **错误清单原样退回。** 不重写、不总结、不替模型判断哪条重要。
+           模型需要看到稳定的 code 和位置，才能逐条修。
+        3. **卡住换策略。** 连续三轮同一组错误 -> 强制整篇重写。
+           局部修补已经被证明无效（实测 8 轮改不动一个字段）。
+
+    代价：每轮都要把完整错误清单塞进上下文。错误多时会挤占预算，
+    所以错误清单要在 `render_issues` 里做截断/排序。
+    """
     tools = BuildTools(req, examples_dir=examples_dir, out_dir=out_dir, tracer=tracer)
     tracer = tools.tracer
 

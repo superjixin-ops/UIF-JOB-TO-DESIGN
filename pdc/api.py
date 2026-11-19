@@ -348,7 +348,24 @@ async def create_build(
     principal: Principal = Depends(_OPERATOR),
     _rate: None = Depends(_rate_limit),
 ) -> dict:
-    """设计文档 -> YAML。产物由模型写，校验器判。"""
+    """设计文档 -> YAML。产物由模型写，校验器判。
+
+    为什么是 202 + 后台线程，不是同步等待：
+
+        Agent 任务 20~60 秒。同步等待会被网关 30 秒超时切断，
+        而任务还在跑、钱还在烧；4 个并发就能把连接占满。
+
+    为什么用 `asyncio.to_thread` 而不是 `async def`：
+
+        Agent 循环里是同步调用（OpenAI SDK、sqlite3、subprocess）。
+        直接 await 会卡住事件循环，所有请求一起卡。
+        `to_thread` 把它们丢到线程池，事件循环继续收请求、推 SSE。
+
+    为什么提前 `read_design`：
+
+        参数错误应该在提交时返回 400，而不是等后台线程跑起来才失败——
+        那时用户已经拿到 202，只能在状态里看到一个看不懂的堆栈。
+    """
     if not (os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY")):
         raise HTTPException(
             status_code=400,

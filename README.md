@@ -182,6 +182,18 @@ scripts/   本地启动 + 隧道 + 语料结构统计
 
 ---
 
+## 文档地图
+
+| 文档 | 回答什么 |
+|---|---|
+| [`docs/design-philosophy.md`](docs/design-philosophy.md) | **为什么这么做**：五条设计原则、代价、反例 |
+| [`docs/hallucination-and-testing.md`](docs/hallucination-and-testing.md) | 幻觉怎么治、测试怎么防自欺（11 个真实问题） |
+| [`docs/retrieval-design.md`](docs/retrieval-design.md) | 切分、测试集、向量库选型与增量更新 |
+| [`docs/memory-design.md`](docs/memory-design.md) | 四路信号、降级、API/CLI 取舍 |
+| [`docs/enterprise-readiness.md`](docs/enterprise-readiness.md) | 七个维度、为什么不做多租户/HA |
+| [`docs/api-and-ui.md`](docs/api-and-ui.md) | FastAPI、异步、SSE、加第三种任务 |
+| [`docs/learning-path.md`](docs/learning-path.md) | 从零到面试的 10 周流程 + 30 个基础追问 |
+
 ## 核心设计决策
 
 | # | 决策 | 理由 |
