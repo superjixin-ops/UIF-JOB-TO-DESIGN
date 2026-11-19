@@ -142,22 +142,36 @@ def parse_pipeline(path: str | Path) -> PipelineFacts:
         raise PipelineParseError(f"{path.name} 的 kind 是 {kind!r}，不是 pipeline")
 
     spec = data.get("spec") or {}
+    if not isinstance(spec, dict):
+        raise PipelineParseError(f"{path.name} 的 spec 不是 mapping")
+    if not isinstance(spec.get("jobs"), list):
+        raise PipelineParseError(f"{path.name} 的 spec.jobs 不是列表")
+
     jobs: list[JobSpec] = []
-    for raw_job in spec.get("jobs") or []:
-        jobs.append(
-            JobSpec(
-                job_type=str(raw_job["jobType"]),
-                extracts=tuple(
-                    _extract(e, i) for i, e in enumerate(raw_job.get("extract") or ())
-                ),
-                transforms=tuple(
-                    _transform(i, t)
-                    for i, t in enumerate(raw_job.get("transform") or (), 1)
-                ),
-                load=_load(raw_job.get("load")),
-                size=str((raw_job.get("setups") or {}).get("size", "?")),
+    for idx, raw_job in enumerate(spec["jobs"], 1):
+        # 模型生成的 YAML 常见缺字段：整个 job 缺 jobType、transform 缺 transformType。
+        # 这里统一转成 PipelineParseError，带上"第几个 job"——
+        # 直接把 KeyError 抛给上层会让校验器崩掉，而校验器的职责是报告错误，不是崩溃。
+        try:
+            jobs.append(
+                JobSpec(
+                    job_type=str(raw_job["jobType"]),
+                    extracts=tuple(
+                        _extract(e, i) for i, e in enumerate(raw_job.get("extract") or ())
+                    ),
+                    transforms=tuple(
+                        _transform(i, t)
+                        for i, t in enumerate(raw_job.get("transform") or (), 1)
+                    ),
+                    load=_load(raw_job.get("load")),
+                    size=str((raw_job.get("setups") or {}).get("size", "?")),
+                )
             )
-        )
+        except (KeyError, TypeError, AttributeError) as exc:
+            raise PipelineParseError(
+                f"第 {idx} 个 job 结构不完整（{type(exc).__name__}: {exc}）；"
+                "每个 job 必须有 jobType，每个 transform 必须有 transformType"
+            ) from exc
 
     return PipelineFacts(
         name=str((data.get("metadata") or {}).get("name", path.stem)),

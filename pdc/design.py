@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import json
+
 from pdc.checks import schema_diff
 from pdc.ir import DesignDoc, Finding, Sheet
 from pdc.models import Column, JobSpec, PipelineFacts
@@ -95,18 +97,30 @@ def build_source_inventory(facts: PipelineFacts) -> Sheet:
 
 
 def build_transform_chain(facts: PipelineFacts) -> Sheet:
+    # Detail 给人看，Params 给机器读。
+    #
+    # 为什么要两列：Detail 为了可读性把 dict/list 参数丢掉了，
+    # 而 columns / mapColumns / columnsToSelect 恰恰是变换的全部语义。
+    # 只留 Detail 的文档是有损的——用这份文档反推 YAML 时，
+    # 重命名映射会整体消失，而校验器（当时只核对列名集合）看不出问题。
+    # 这是反向 round-trip 测试暴露出来的真实缺陷。
     s = Sheet(
         "Transform Chain",
-        ["#", "Job", "Step", "transformType", "Inputs", "Output", "Detail"],
-        widths=[5, 20, 6, 22, 44, 30, 60],
+        ["#", "Job", "Step", "transformType", "Inputs", "Output", "Detail", "Params"],
+        widths=[5, 20, 6, 22, 44, 30, 60, 60],
     )
     for j in facts.jobs:
         for t in j.transforms:
-            detail = ", ".join(f"{k}={v}" for k, v in t.detail.items() if not isinstance(v, (dict, list)))
+            detail = ", ".join(
+                f"{k}={v}" for k, v in t.detail.items() if not isinstance(v, (dict, list))
+            )
             if t.sql:
                 detail = (t.sql[:300] + "...") if len(t.sql) > 300 else t.sql
+            params = json.dumps(t.detail, ensure_ascii=False, default=str) if t.detail else ""
+            if len(params) > 4000:
+                params = params[:4000] + "…"
             s.add(t.index, j.job_type, t.index, t.transform_type,
-                  ", ".join(t.inputs), t.output or "-", detail)
+                  ", ".join(t.inputs), t.output or "-", detail, params)
     return s
 
 

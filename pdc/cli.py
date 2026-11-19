@@ -282,6 +282,81 @@ def cmd_agent(args: argparse.Namespace) -> int:
     return 0 if not result.issues else 1
 
 
+def cmd_build(args: argparse.Namespace) -> int:
+    """设计文档 -> YAML。产物由模型写，校验器判。
+
+    为什么没有 --mode offline：
+      一旦给这条路加一个"模板渲染"的离线实现，这个任务就退化成 workflow，
+      也就失去了它存在的意义。离线只能跑到"读出需求"这一步（--dry-run）。
+    """
+    from pdc.design_reader import SpecReadError, read_design
+    from pdc.trace import Tracer
+    from pdc.yamlgen import requirement_from_design, requirement_from_text, run_build
+
+    source = Path(args.source)
+    if not source.exists():
+        print(f"找不到输入文件: {source}", file=sys.stderr)
+        return 2
+
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if source.suffix.lower() in {".xlsx", ".xlsm"}:
+        try:
+            spec = read_design(source)
+        except SpecReadError as exc:
+            print(f"读不了设计文档: {exc}", file=sys.stderr)
+            return 2
+        req = requirement_from_design(spec)
+    elif source.suffix.lower() in {".md", ".txt"}:
+        req = requirement_from_text(source.read_text(encoding="utf-8"), args.name)
+    else:
+        print("只接受 .xlsx（结构化设计文档）或 .md/.txt（自由文本需求）", file=sys.stderr)
+        return 2
+
+    print(f"[build] 输入={source.name} 形态={req.label} pipeline={req.pipeline}")
+    for w in req.warnings:
+        print(f"[build] 文档告警: {w}")
+
+    if args.dry_run:
+        print("\n--- 读到的需求 ---\n")
+        print(req.prompt)
+        return 0
+
+    if not (os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY")):
+        print(
+            "生成 YAML 必须用真实模型：产物是模型写的，没有模型就没有产物。\n"
+            "设置 OPENAI_API_KEY（或 DEEPSEEK_API_KEY）后重试；只看需求用 --dry-run。",
+            file=sys.stderr,
+        )
+        return 2
+
+    llm = _make_llm(args.model, getattr(args, "route", ""))
+    tracer = Tracer(path=out_dir / f"{req.pipeline}-build-trace.jsonl")
+
+    result = run_build(
+        llm,
+        req,
+        max_rounds=args.max_rounds,
+        out_dir=out_dir,
+        examples_dir=Path(args.examples) if args.examples else None,
+        tracer=tracer,
+        budget=args.budget or None,
+    )
+
+    print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+    print("\n--- trace ---")
+    print(json.dumps(tracer.stats(), ensure_ascii=False, indent=2))
+
+    if result.passed:
+        print(f"\n✅ 校验通过，产物: {result.yaml_path}")
+        print(f"   下一步: uv run pdc parse {result.yaml_path}")
+        return 0
+
+    print(f"\n❌ 未通过（{result.rounds} 轮）。草稿保留在 {result.yaml_path or '无'}，未交付。")
+    return 1
+
+
 def cmd_audit(args: argparse.Namespace) -> int:
     from pdc.audit import main as audit_main
 
@@ -339,6 +414,21 @@ def main(argv: list[str] | None = None) -> int:
         help="会话 ID。给了就启用记忆（短期窗口 + 摘要 + 落盘）",
     )
     a.set_defaults(func=cmd_agent)
+
+    b = sub.add_parser("build", help="设计文档 -> pipeline YAML（模型写，校验器判）")
+    b.add_argument("source", help=".xlsx 设计文档，或 .md/.txt 需求文本")
+    b.add_argument("--name", default="", help="自由文本模式下指定 pipeline 名称")
+    b.add_argument("--out", default=str(DEFAULT_OUT))
+    b.add_argument("--model", default="deepseek-chat")
+    b.add_argument("--max-rounds", type=int, default=8)
+    b.add_argument("--budget", type=int, default=0, help="token 预算，0 表示不限")
+    b.add_argument("--dry-run", action="store_true", help="只打印读到的需求，不调模型")
+    b.add_argument(
+        "--examples", default="",
+        help="参考示例目录。评测时用它做留一法，避免模型直接抄到源文件",
+    )
+    b.add_argument("--route", choices=["", "cost", "quality", "balanced"], default="")
+    b.set_defaults(func=cmd_build)
 
     e = sub.add_parser("eval", help="跑评测集")
     e.add_argument("--cases", type=int, default=20)

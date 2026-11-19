@@ -8,7 +8,7 @@
 |---|---|
 | 仓库 | [superjixin-ops/UIF-JOB-TO-DESIGN](https://github.com/superjixin-ops/UIF-JOB-TO-DESIGN) |
 | 在线演示 | `https://3eea34987613e6.app.lhr.life`（临时隧道，token `demo-token`） |
-| 规模 | **161 测试** · 33 模块 · 9,017 行 |
+| 规模 | **189 测试** · 36 模块 · 9,600+ 行 |
 | 效果 | 单文件设计文档 **4 小时 → 13 秒**；8 条真实流水线四指标全过 |
 | 技术栈 | Python 3.12 · FastAPI · asyncio · SQLite · LangGraph · MCP |
 
@@ -28,7 +28,43 @@
 
 在样例上的实际输出：**1 条 high（7 列 schema 漂移）+ 2 条 check**，offline 模式 60 ms。
 
+## 两个方向，一个闭环
+
+这套东西有两个 Agent，方向相反：
+
+| | **design** | **build** |
+|---|---|---|
+| 输入 | pipeline YAML | 设计文档（xlsx / md） |
+| 输出 | 8 张表的设计文档 | **可运行的 pipeline YAML** |
+| 谁写产物 | 代码 | **模型** |
+| 模型负责 | 决定查什么、怎么叙述 | 决定读哪个示例、怎么改 |
+| 终止条件 | 步数 / 校验 | **校验器通过** |
+| 离线能跑吗 | 能（SOP 模式） | **不能**——没有模型就没有产物 |
+
+build 方向才是"真 Agent"的判定标准：**产物是模型写的，失败无法伪装。**
+YAML 解析不了就是解析不了，列对不上就是跑不起来。
+
+```bash
+# 1) YAML -> 设计文档
+uv run pdc design samples/pipelines/fact-order-fulfillment.yaml
+
+# 2) 设计文档 -> YAML（模型写，校验器判）
+uv run pdc build out/fact-order-fulfillment-design.xlsx
+
+# 3) 验证产物真的能用
+uv run pdc parse out/fact-order-fulfillment.yaml
+```
+
+**控制流三件事**：
+
+1. **裁判先行**——`spec_validator`（结构/契约/安全）+ `spec_grounding`（事实对齐）
+2. **硬门禁**——模型调 `finish` 时重新校验，不过就驳回并附错误清单
+3. **卡住换策略**——连续 3 轮同一组错误，强制整篇重写
+
+完整记录见 [`../设计转YAML-Agent-幻觉与测试治理.md`](../设计转YAML-Agent-幻觉与测试治理.md)。
+
 ## 为什么不是脚本
+
 
 因为**一份文档错一个列名就不可信**，所以系统被切成两半：
 
@@ -65,7 +101,7 @@ uv run pdc run samples/pipelines
 
 | 模块 | 实现 | 一句话 |
 |---|---|---|
-| 01 基础概念 | 两个入口 | 给文件是工作流，给目录是 Agent |
+| 01 基础概念 | 两个入口 + 两个方向 | 给文件是工作流，给目录是 Agent；build 是产物由模型写 |
 | 02 核心框架 | `agent.py` / `planner.py` / `langgraph_engine.py` | ReAct / Plan-and-Execute / 图执行，可切换对比 |
 | 03 RAG | `rag.py` / `rerank.py` / `embed.py` | BM25 + 向量 + α 调参 + 重排，有实测曲线 |
 | 04 工具调用 | `tools.py` / `mcp_client.py` / `mcp_server.py` | 7 本地工具 + MCP 远端工具 |
@@ -73,6 +109,7 @@ uv run pdc run samples/pipelines
 | 06 多智能体 | `multiagent.py` | Supervisor + Worker，工具白名单隔离 |
 | 07 大模型基础 | — | 不需要代码 |
 | 08 工程化 | `routing.py` / `security.py` / `jobs.py` / `trace.py` | 路由 + 熔断 + 鉴权 + 限流 + 预算 + 异步任务 |
+| 幻觉治理 | `spec_validator.py` / `spec_grounding.py` | 四类幻觉、四层检测、硬门禁、假通过防护 |
 | 09 Prompt | `agent.py` / `safety.py` | 结构化输出 + 注入防御 |
 
 ## 项目结构
@@ -98,9 +135,9 @@ pdc/
   trace.py                 全链路追踪（含脱敏）
   api.py / cli.py          接口层
   ui/index.html            单文件控制台
-eval/      四指标评测 + 审计 golden set
+eval/      四指标评测 + 审计 golden set + 反向生成留一法评测
 rag/       检索评测、α 扫描、A/B、引用分析
-tests/     161 个用例
+tests/     189 个用例
 loadtest/  并发压测
 samples/   虚构样例数据（可公开）
 scripts/   本地启动 + 隧道
