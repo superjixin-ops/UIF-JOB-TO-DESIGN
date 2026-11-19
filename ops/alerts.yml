@@ -1,0 +1,40 @@
+# 告警规则：阈值放在配置文件里，判定逻辑在 scripts/check_alerts.py。
+#
+# 为什么不写 PromQL：这个项目没有 Prometheus。
+# 规则类型用代码实现（4 种），阈值用配置——这样"改阈值"不需要改代码，
+# 而"加一种规则"才需要，边界清楚。
+rules:
+  - name: high_error_rate
+    kind: error_rate
+    threshold: 0.05          # 5xx 占比超过 5%
+    window: 5m
+    severity: page
+    runbook: 看 /metrics 里 status="5xx" 的 path 分布，优先查 /runs
+
+  - name: slow_p95
+    kind: p95_latency_ms
+    threshold: 3000          # p95 超过 3 秒
+    window: 5m
+    severity: ticket
+    runbook: 先看是不是并发打满，再看模型延迟
+
+  - name: auth_failure_spike
+    kind: counter
+    metric: pdc_auth_failures_total
+    threshold: 20
+    severity: page
+    runbook: 可能是扫描或 token 轮换没同步
+
+  - name: queue_saturated
+    kind: gauge_max
+    metric: pdc_queue_depth
+    threshold: 8
+    severity: ticket
+    runbook: 并发上限是 4，持续超过 8 说明积压
+
+  - name: no_traffic
+    kind: counter_below
+    metric: pdc_http_requests_total
+    threshold: 1
+    severity: info
+    runbook: 低于阈值说明服务可能没流量或探针挂错

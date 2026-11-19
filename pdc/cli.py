@@ -407,6 +407,55 @@ def cmd_bench(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """检查配置：一次报全部问题，而不是启动后逐个撞。"""
+    from pdc.config import ConfigError, Settings
+
+    settings = Settings.load()
+    print(json.dumps(settings.redacted(), ensure_ascii=False, indent=2))
+    try:
+        settings.validate()
+    except ConfigError as exc:
+        print("\n" + str(exc), file=sys.stderr)
+        return 1
+    print("\n配置检查通过。")
+    return 0
+
+
+def cmd_backup(args: argparse.Namespace) -> int:
+    from pdc import backup
+
+    if args.action == "create":
+        result = backup.create(out_dir=args.out, keep=args.keep)
+        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+        return 0
+    if args.action == "verify":
+        report = backup.verify(args.archive)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0 if report["ok"] else 1
+    if args.action == "restore":
+        try:
+            out = backup.restore(args.archive, args.to, force=args.force)
+        except (FileExistsError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return 0
+    raise SystemExit(f"未知动作: {args.action}")
+
+
+def cmd_audit_log(args: argparse.Namespace) -> int:
+    from pdc.audit_log import AuditLog
+
+    log = AuditLog(args.db or None)
+    if args.action == "verify":
+        ok, bad = log.verify()
+        print(json.dumps({"ok": ok, "first_bad_seq": bad}, ensure_ascii=False))
+        return 0 if ok else 1
+    print(json.dumps({"total": log.count(), "events": log.list(limit=args.limit)}, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_audit(args: argparse.Namespace) -> int:
     from pdc.audit import main as audit_main
 
@@ -502,6 +551,24 @@ def main(argv: list[str] | None = None) -> int:
     be.add_argument("--sizes", default="1000,10000,100000")
     be.add_argument("--queries", type=int, default=20)
     be.set_defaults(func=cmd_bench)
+
+    doc = sub.add_parser("doctor", help="检查配置（不启动服务）")
+    doc.set_defaults(func=cmd_doctor)
+
+    bk = sub.add_parser("backup", help="备份 / 校验 / 恢复 SQLite")
+    bk.add_argument("action", choices=["create", "verify", "restore"])
+    bk.add_argument("--out", default="backups")
+    bk.add_argument("--keep", type=int, default=7)
+    bk.add_argument("--archive", default="")
+    bk.add_argument("--to", default="restored")
+    bk.add_argument("--force", action="store_true")
+    bk.set_defaults(func=cmd_backup)
+
+    al = sub.add_parser("audit-log", help="审计日志：列表 / 校验哈希链")
+    al.add_argument("action", choices=["list", "verify"], nargs="?", default="list")
+    al.add_argument("--db", default="")
+    al.add_argument("--limit", type=int, default=20)
+    al.set_defaults(func=cmd_audit_log)
 
     e = sub.add_parser("eval", help="跑评测集")
     e.add_argument("--cases", type=int, default=20)

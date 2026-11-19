@@ -139,7 +139,7 @@ def test_stream_ends_with_done():
     run_id = r.json()["run_id"]
 
     events: list[dict] = []
-    with client.stream("GET", f"/runs/{run_id}/stream") as resp:
+    with client.stream("GET", f"/runs/{run_id}/stream?token={TOKEN}") as resp:
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("text/event-stream")
         for line in resp.iter_lines():

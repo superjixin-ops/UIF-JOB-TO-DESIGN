@@ -8,7 +8,7 @@
 |---|---|
 | 仓库 | [superjixin-ops/UIF-JOB-TO-DESIGN](https://github.com/superjixin-ops/UIF-JOB-TO-DESIGN) |
 | 在线演示 | `https://3eea34987613e6.app.lhr.life`（临时隧道，token `demo-token`） |
-| 规模 | **206 测试** · 37 模块 · 7,723 行主代码 + 2,588 行测试 |
+| 规模 | **239 测试** · 45 模块 · 9,366 行主代码 + 3,144 行测试 |
 | 效果 | 设计文档 **4 小时 → 13 秒**；反向生成 **留一法 4/4 通过**，平均 2 轮、约 $0.02 一条；143 个键值与源文件零差异 |
 | 技术栈 | Python 3.12 · FastAPI · asyncio · SQLite · LangGraph · MCP |
 
@@ -161,14 +161,20 @@ pdc/
   rag.py / rerank.py / embed.py  检索与重排
   memory.py                记忆
   routing.py               模型路由 + 三态熔断
-  security.py              鉴权 / 限流 / 预算
+  security.py              限流 / 预算
+  config.py                启动配置校验（fail fast）
+  auth.py                  RBAC：viewer / operator / admin
+  audit_log.py             审计日志（哈希链，防篡改）
+  metrics.py               Prometheus 指标
+  backup.py                在线备份 / 校验 / 恢复
   jobs.py                  SQLite 任务持久化
   trace.py                 全链路追踪（含脱敏）
   api.py / cli.py          接口层
   ui/index.html            单文件控制台
+ops/       告警规则 + 检查脚本
 eval/      四指标评测 + 审计 golden set + 反向生成留一法 + 逐键保真审计
 rag/       检索评测（样例语料可复现）、α 扫描、A/B、引用分析
-tests/     206 个用例
+tests/     239 个用例
 loadtest/  并发压测
 samples/   虚构样例数据（可公开）
 scripts/   本地启动 + 隧道 + 语料结构统计
@@ -328,6 +334,53 @@ tracer 把工具返回值截断成 2,000 字符的字符串，分析脚本按 li
 
 这两个 bug 都只有端到端跑才能暴露，单测覆盖不到。
 
+## few-shot 选择：一个否定结果
+
+给 12 条真实 pipeline 做留一法生成，比较三种示例策略。
+
+第一轮结果（**已被判定无效，原因见下**）：
+
+| 组 | 通过 | 单次 token |
+|---|---|---|
+| 无示例 | **0 / 11** | 258k |
+| 随机 3 条 | 9 / 11 | 148k |
+| 结构近邻 3 条 | 7 / 11 | 148k |
+
+看起来"结构近邻更差"。查下去发现是**工具的锅**：
+
+```
+read_example 只返回前 220 行
+真实 pipeline 平均 600 行，load: 常在 220 行之后
+```
+
+| 组 | 示例里 `load:` 的行号 | 看得到 schema |
+|---|---|---|
+| 结构组（失败） | 248 / 235 / 367 / 671 / 344 / 700 | ❌ |
+| 结构组（通过） | 93 / 71 / 66 | ✅ |
+| 随机组 | 常抽到 25~106 行的短文件 | ✅ |
+
+结构近邻倾向选同 job 链的长文件，被截断得更狠；
+随机组恰好常抽到短文件。**实验测的是截断，不是检索。**
+
+修法：截断时保住 `load:` 整段。拿同样 4 条失败用例重跑，**3 条恢复通过**。
+
+修完后的结论：
+
+| 组 | 通过 |
+|---|---|
+| 无示例 | 0 / 11 |
+| 随机 | **10 / 11 = 91%** |
+| 结构近邻 | **10 / 11 = 91%** |
+
+**三句话：**
+
+1. **few-shot 是必需的**：0% → 91%，差距比任何检索优化都大。
+2. **"更相似"的示例没有额外收益**：结构近邻和随机打平（n=11，差异在噪声内）。
+3. **所以不需要为示例选择上向量库**。向量库留给 `pdc search`（语义找 pipeline）。
+
+**成本**：无示例组每条要 258k token（全是失败重试），成功组 148k。
+失败比成功贵 1.7 倍，而无示例组 11 条全失败——对照组跑 2 条就够，我跑了 11 条。
+
 ## 语义检索（可选向量库）
 
 给 5,816 条 pipeline 做语义索引，两个后端可切换：
@@ -365,6 +418,41 @@ uv run pdc bench --index out/index --sizes 1000,10000,100000
 **已知限制**：卡片是英文（YAML 标识符），`bge-small-zh` 跨语言能力弱。
 中文查询靠一个 24 词的小词表补英文，能命中但不够好。
 正式做法是换多语模型：`PDC_EMBED_MODEL=intfloat/multilingual-e5-small`。
+
+## 企业级能力
+
+不是功能多，是**出问题时有人能回答**：
+
+| 问题 | 能力 | 命令 / 端点 |
+|---|---|---|
+| 这是谁操作的？ | RBAC + 审计日志（哈希链） | `GET /audit` · `pdc audit-log verify` |
+| 服务现在怎么样？ | Prometheus 指标 + 5 条告警规则 | `GET /metrics` · `python -m scripts.check_alerts` |
+| 数据丢了怎么办？ | 在线备份 + 校验 + 恢复 | `pdc backup create/verify/restore` |
+| 配置写错了怎么办？ | 启动即校验，一次报全部问题 | `pdc doctor` |
+
+```bash
+# 1. 配置检查（不启动服务）
+pdc doctor
+
+# 2. 三个角色
+export PDC_TOKENS="viewer-token-0001:viewer,operator-token-01:operator,admin-token-00001:admin"
+
+# 3. 权限矩阵：viewer 只能看，operator 能提交，admin 能看审计和指标
+curl -X POST localhost:8000/runs -H "Authorization: Bearer viewer-token-0001"   # 403
+
+# 4. 审计：改一条，后面全部对不上
+pdc audit-log verify
+
+# 5. 备份 + 恢复演练
+pdc backup create --out backups --keep 7
+pdc backup verify --archive backups/backup-*.tar.gz
+```
+
+**刻意没做的**：多租户、水平扩展、K8s。
+没有第二个用户、没有负载，做了也无法验证——那叫企业级表演，不叫企业级。
+
+完整设计（每个能力的方案对比、代价、踩坑、面试话术）：
+[`docs/enterprise-readiness.md`](docs/enterprise-readiness.md)。
 
 ## 并发与压测
 

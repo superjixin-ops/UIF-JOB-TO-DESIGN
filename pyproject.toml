@@ -41,3 +41,8 @@ target-version = "py312"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI 的标准写法就是把 Depends(...) 放在参数默认值里。
+# 不豁免的话每个端点都会报 B008，只能到处加 noqa。
+extend-immutable-calls = ["fastapi.Depends"]

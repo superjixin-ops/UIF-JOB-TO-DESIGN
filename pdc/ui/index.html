@@ -139,7 +139,11 @@ function addStep(s) {
 }
 
 function watch(id) {
-  es = new EventSource(`/runs/${id}/stream`);
+  // EventSource 不能自定义请求头，token 只能走 query。
+  // 生产上应该改成短期签名 URL，避免 token 进 access log。
+  const t = $('token').value.trim();
+  const q = t ? `?token=${encodeURIComponent(t)}` : '';
+  es = new EventSource(`/runs/${id}/stream${q}`);
   es.onmessage = (ev) => {
     const d = JSON.parse(ev.data);
     if (d.kind === 'done') {

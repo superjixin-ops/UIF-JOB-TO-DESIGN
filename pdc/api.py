@@ -24,29 +24,76 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 import uuid
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from pdc.agent import run_with_self_check
+from pdc.audit_log import AuditLog
+from pdc.auth import Principal, require_role
+from pdc.config import Settings
 from pdc.jobs import JobStore
 from pdc.llm import OpenAICompatibleLLM, RuleBasedLLM
+from pdc.metrics import METRICS
 from pdc.paths import describe, out_dir, repo_dir
-from pdc.security import RateLimiter, require_token, token_budget
+from pdc.security import RateLimiter, token_budget
 from pdc.tools import Toolbox
 from pdc.trace import Tracer
 
 app = FastAPI(title="Pipeline Design Copilot", version="1.0.0")
+AUDIT = AuditLog()
+SETTINGS = Settings.load().validate()  # 配置错就启动失败，不要带病运行
+
+# 依赖在模块级建好：FastAPI 的 Depends 里如果每次调用 require_role(...)，
+# ruff 会报 B008（函数默认值里做函数调用），而且每次请求都会重建闭包。
+_VIEWER = require_role("viewer")
+_OPERATOR = require_role("operator")
+_ADMIN = require_role("admin")
+_SSE = require_role("viewer", allow_query=True)
 
 OUT = out_dir()
 STORE = JobStore(OUT / "jobs.db")
 STORE.mark_orphans()  # 上次进程留下的 queued/running 全部标失败
 
 app.mount("/files", StaticFiles(directory=str(OUT)), name="files")
+
+
+def _route(request: Request) -> str:
+    """用路由模板做标签，避免 /runs/{id} 产生无限多时间序列。"""
+    route = request.scope.get("route")
+    return getattr(route, "path", "") or "unmatched"
+
+
+@app.middleware("http")
+async def _observe(request: Request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    path = _route(request)
+    METRICS.inc(
+        "pdc_http_requests_total",
+        {"method": request.method, "path": path, "status": str(response.status_code)},
+    )
+    METRICS.observe(
+        "pdc_http_request_duration_seconds", time.perf_counter() - start, {"path": path}
+    )
+
+    ip = request.client.host if request.client else ""
+    if response.status_code == 401:
+        METRICS.inc("pdc_auth_failures_total")
+        AUDIT.append(actor="anonymous", role="-", action="auth_failed", result="401",
+                     ip=ip, target=path)
+    elif response.status_code == 403:
+        METRICS.inc("pdc_authz_denied_total")
+        AUDIT.append(actor="unknown", role="-", action="authz_denied", result="403",
+                     ip=ip, target=path)
+    elif response.status_code == 429:
+        METRICS.inc("pdc_rate_limited_total")
+    return response
 
 MAX_CONCURRENCY = int(os.getenv("PDC_MAX_CONCURRENCY", "4"))
 _active = 0
@@ -100,7 +147,8 @@ def health() -> dict:
         "in_flight": _active,
         "rate_limit_per_min": _limiter.per_min,
         "token_budget": token_budget(),
-        "auth_required": bool(os.getenv("PDC_API_TOKEN", "").strip()),
+        "auth_required": bool(os.getenv("PDC_TOKENS", "").strip() or os.getenv("PDC_API_TOKEN", "").strip()),
+        "roles": sorted(SETTINGS.tokens.values()),
         "paths": describe(),
     }
 
@@ -115,7 +163,7 @@ def index():
 
 @app.get("/pipelines")
 def pipelines(
-    _auth: None = Depends(require_token),
+    _p: Principal = Depends(_VIEWER),
     _rate: None = Depends(_rate_limit),
 ) -> dict:
     base = repo_dir()
@@ -131,7 +179,8 @@ def pipelines(
 )
 async def create_run(
     req: RunRequest,
-    _auth: None = Depends(require_token),
+    request: Request,
+    principal: Principal = Depends(_OPERATOR),
     _rate: None = Depends(_rate_limit),
 ) -> dict:
     if not _admit():
@@ -149,6 +198,17 @@ async def create_run(
         raise
     _LIVE[run_id] = []
 
+    METRICS.inc("pdc_runs_total", {"status": "accepted"})
+    METRICS.set("pdc_queue_depth", _active)
+    AUDIT.append(
+        actor=principal.token_id,
+        role=principal.role,
+        action="run.create",
+        target=req.pipeline,
+        result="accepted",
+        ip=request.client.host if request.client else "",
+        detail=f"run_id={run_id} mode={req.mode}",
+    )
     asyncio.create_task(asyncio.to_thread(_run_and_release, run_id, req))
     return {"run_id": run_id, "status": "queued", "poll": f"/runs/{run_id}"}
 
@@ -161,7 +221,7 @@ def _run_and_release(run_id: str, req: RunRequest) -> None:
 
 
 @app.get("/runs/{run_id}")
-def get_run(run_id: str, _: None = Depends(require_token)) -> dict:
+def get_run(run_id: str, _p: Principal = Depends(_VIEWER)) -> dict:
     record = STORE.get(run_id)
     if record is None:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -169,7 +229,7 @@ def get_run(run_id: str, _: None = Depends(require_token)) -> dict:
 
 
 @app.get("/runs/{run_id}/trace")
-def get_trace(run_id: str, _: None = Depends(require_token)) -> dict:
+def get_trace(run_id: str, _p: Principal = Depends(_VIEWER)) -> dict:
     if STORE.get(run_id) is None:
         raise HTTPException(status_code=404, detail="任务不存在")
     path = OUT / f"{run_id}.trace.jsonl"
@@ -180,18 +240,59 @@ def get_trace(run_id: str, _: None = Depends(require_token)) -> dict:
 
 
 @app.post("/runs/{run_id}/cancel")
-def cancel_run(run_id: str, _: None = Depends(require_token)) -> dict:
+def cancel_run(
+    run_id: str, principal: Principal = Depends(_OPERATOR)
+) -> dict:
     record = STORE.get(run_id)
     if record is None:
         raise HTTPException(status_code=404, detail="任务不存在")
     if record.status not in ("queued", "running"):
         return {"run_id": run_id, "status": record.status, "note": "任务已结束"}
     _CANCELS.add(run_id)
+    AUDIT.append(
+        actor=principal.token_id,
+        role=principal.role,
+        action="run.cancel",
+        target=run_id,
+        result="accepted",
+    )
     return {"run_id": run_id, "status": "cancelling", "note": "当前步骤结束后停止"}
 
 
+@app.get("/metrics")
+def metrics(_p: Principal = Depends(_ADMIN)) -> Response:
+    """Prometheus 文本格式。低基数、无敏感信息。"""
+    METRICS.set("pdc_queue_depth", _active)
+    METRICS.set("pdc_jobs_total", STORE.count() if hasattr(STORE, "count") else 0)
+    return Response(content=METRICS.render(), media_type="text/plain; version=0.0.4")
+
+
+@app.get("/audit")
+def audit_list(
+    limit: int = 50,
+    offset: int = 0,
+    action: str = "",
+    _p: Principal = Depends(_ADMIN),
+) -> dict:
+    limit = max(1, min(limit, 500))
+    return {
+        "total": AUDIT.count(),
+        "events": AUDIT.list(limit=limit, offset=offset, action=action),
+    }
+
+
+@app.get("/audit/verify")
+def audit_verify(_p: Principal = Depends(_ADMIN)) -> dict:
+    ok, bad_seq = AUDIT.verify()
+    return {"ok": ok, "first_bad_seq": bad_seq}
+
+
 @app.get("/runs/{run_id}/stream")
-async def stream_run(run_id: str, request: Request) -> StreamingResponse:
+async def stream_run(
+    run_id: str,
+    request: Request,
+    _p: Principal = Depends(_SSE),
+) -> StreamingResponse:
     """SSE：先回放已产生的步骤，再实时推送新的。"""
     if STORE.get(run_id) is None:
         raise HTTPException(status_code=404, detail="任务不存在")

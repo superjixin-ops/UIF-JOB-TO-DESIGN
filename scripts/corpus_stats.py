@@ -28,7 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pdc.parser import PipelineParseError, parse_pipeline  # noqa: E402
+from pdc.parser import PipelineParseError, parse_pipeline
 
 
 def _signature(facts) -> tuple:
