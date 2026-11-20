@@ -28,6 +28,8 @@ SYSTEM_PROMPT = """你是 ETL 设计文档生成专家。你的工作是把 UIF 
 4. write_document 之后必须调用 validate_document 自检。
 5. 如果 validate_document 返回 issues，必须描述你打算怎么修，并重新生成。
 6. 事实不足时写 "not asserted"，不要编造。
+7. 任务涉及多源维度、DDL、增量加载等模式时，先 list_skills 看有没有现成做法，
+   需要时用 read_skill 加载全文；不要凭记忆编造 skill 内容。
 
 工作顺序（除非用户另有要求）：
   inspect_pipeline -> diff_schema -> search_rules -> build_design

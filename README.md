@@ -8,7 +8,7 @@
 |---|---|
 | 仓库 | [superjixin-ops/UIF-JOB-TO-DESIGN](https://github.com/superjixin-ops/UIF-JOB-TO-DESIGN) |
 | 在线演示 | `https://3eea34987613e6.app.lhr.life`（临时隧道，token `demo-token`） |
-| 规模 | **255 测试** · 46 模块 · 10,235 行主代码 + 3,447 行测试 |
+| 规模 | **262 测试** · 47 模块 · 10,427 行主代码 + 3,556 行测试 |
 | 效果 | 设计文档 **4 小时 → 13 秒**；反向生成 **留一法 4/4 通过**，平均 2 轮、约 $0.02 一条；143 个键值与源文件零差异 |
 | 技术栈 | Python 3.12 · FastAPI · asyncio · SQLite · LangGraph · LangChain · MCP · pgvector |
 
@@ -135,7 +135,7 @@ uv run pdc run samples/pipelines
 | 01 基础概念 | 两个入口 + 两个方向 | 给文件是工作流，给目录是 Agent；build 是产物由模型写 |
 | 02 核心框架 | `agent.py` / `planner.py` / `langgraph_engine.py` / `langchain_engine.py` | 五个引擎：ReAct / Plan / 多 Agent / LangGraph / LangChain |
 | 03 RAG | `rag.py` / `rerank.py` / `embed.py` | BM25 + 向量 + α 调参 + 重排，有实测曲线 |
-| 04 工具调用 | `tools.py` / `mcp_client.py` / `mcp_server.py` | 7 本地工具 + MCP 远端工具 |
+| 04 工具调用 | `tools.py` / `mcp_client.py` / `mcp_server.py` / `skills.py` | 9 本地工具 + MCP 远端工具 + Skill 渐进披露 |
 | 05 记忆 | `memory.py` | 滑窗 + 摘要压缩 + JSONL + **四路信号检索** |
 | 06 多智能体 | `multiagent.py` | Supervisor + Worker，工具白名单隔离 |
 | 07 大模型基础 | — | 不需要代码 |
@@ -175,7 +175,7 @@ pdc/
 ops/       告警规则 + 检查脚本
 eval/      四指标评测 + 审计 golden set + 反向生成留一法 + 逐键保真审计
 rag/       检索评测（样例语料可复现）、α 扫描、A/B、引用分析
-tests/     255 个用例
+tests/     262 个用例
 loadtest/  并发压测
 samples/   虚构样例数据（可公开）
 scripts/   本地启动 + 隧道 + 语料结构统计
@@ -195,6 +195,7 @@ scripts/   本地启动 + 隧道 + 语料结构统计
 | [`docs/api-and-ui.md`](docs/api-and-ui.md) | FastAPI、异步、SSE、加第三种任务 |
 | [`docs/learning-path.md`](docs/learning-path.md) | 从零到面试的 10 周流程 + 30 个基础追问 |
 | [`docs/engines-and-backends.md`](docs/engines-and-backends.md) | 五个引擎、三个向量后端的取舍与实测 |
+| [`docs/skills.md`](docs/skills.md) | RAG / Skill / MCP / Multi-Agent 的区别与渐进披露 |
 
 ## 核心设计决策
 
@@ -478,6 +479,32 @@ score = 0.45 词面 + 0.35 向量 + 0.15 时间衰减 + 0.05 同会话加成
 
 API 只用词面 + 衰减（多 worker 各加载一份模型不划算），CLI 用完整四路。
 这是取舍，不是漏做。设计见 [`docs/memory-design.md`](docs/memory-design.md)。
+
+## Skill 运行时（渐进披露）
+
+Skill 不是"切块扔进 RAG"，而是**先给元数据、按需加载全文**：
+
+```bash
+uv run pdc skills list
+uv run pdc skills show multi-source-dimension
+```
+
+```
+第一步  list_skills()        name + description（几十 token）
+第二步  模型判断相关性        不需要的 skill 永远不展开
+第三步  read_skill(name)    才加载全文
+```
+
+| 对比 | RAG | Skill |
+|---|---|---|
+| 解决 | 找相关片段 | 给完整做法 |
+| 进入上下文 | 检索到就进 | 模型主动选择才进 |
+| 元数据 | 无 | name + description |
+
+测试里有一条硬断言：**元数据总长度 < 全文的 1/3**。
+列表如果把正文带出来，就不叫渐进披露。
+
+设计见 [`docs/skills.md`](docs/skills.md)。
 
 ## 企业级能力
 

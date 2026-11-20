@@ -501,6 +501,28 @@ def cmd_memory(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_skills(args: argparse.Namespace) -> int:
+    from pdc.paths import skills_dir
+    from pdc.skills import SkillRegistry
+
+    registry = SkillRegistry(args.dir or skills_dir())
+    if args.action == "list":
+        print(json.dumps(
+            {"count": len(registry), "skills": [m.to_dict() for m in registry.list()]},
+            ensure_ascii=False, indent=2,
+        ))
+        return 0
+
+    try:
+        skill = registry.read(args.name)
+    except KeyError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(f"# {skill.meta.name}\n\n{skill.meta.description}\n")
+    print(skill.body)
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """检查配置：一次报全部问题，而不是启动后逐个撞。"""
     from pdc.config import ConfigError, Settings
@@ -658,6 +680,12 @@ def main(argv: list[str] | None = None) -> int:
     mem.add_argument("--top", type=int, default=5)
     mem.add_argument("--no-vector", action="store_true")
     mem.set_defaults(func=cmd_memory)
+
+    sk = sub.add_parser("skills", help="列出 / 查看 skill（渐进披露的元数据）")
+    sk.add_argument("action", choices=["list", "show"], nargs="?", default="list")
+    sk.add_argument("name", nargs="?", default="", help="show 时的 skill 名")
+    sk.add_argument("--dir", default="", help="自定义 skills 目录")
+    sk.set_defaults(func=cmd_skills)
 
     doc = sub.add_parser("doctor", help="检查配置（不启动服务）")
     doc.set_defaults(func=cmd_doctor)

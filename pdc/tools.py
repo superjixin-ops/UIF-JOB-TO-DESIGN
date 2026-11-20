@@ -21,8 +21,10 @@ from pdc.models import PipelineFacts
 from pdc.parser import PipelineParseError, parse_pipeline
 from pdc.paths import out_dir as default_out_dir
 from pdc.paths import repo_dir as default_repo_dir
+from pdc.paths import skills_dir as default_skills_dir
 from pdc.rag import get_retriever
 from pdc.render import render_review_md, render_xlsx
+from pdc.skills import SkillRegistry
 from pdc.trace import Tracer
 from pdc.validate import validate_doc
 
@@ -65,6 +67,8 @@ class Toolbox:
         else:
             # 默认走混合检索（α=0.1）；PDC_RAG_MODE=bm25 可降级
             self.rules = get_retriever()
+        # Skill 运行时：只加载元数据，正文按需读取（渐进披露）
+        self.skills = SkillRegistry(default_skills_dir())
         # 审计模式的状态：模型自己决定记什么、看什么
         # MCP：远端工具。attach 之后 tool_schemas() 会带上，call() 会兜底转发
         self.mcp = None
@@ -81,6 +85,8 @@ class Toolbox:
             "validate_document": self.validate_document,
             "record_finding": self.record_finding,
             "finish_audit": self.finish_audit,
+            "list_skills": self.list_skills,
+            "read_skill": self.read_skill,
         }
 
     # ---------------- 工具实现 ----------------
@@ -207,6 +213,25 @@ class Toolbox:
             "grounding_score": grounding_score(violations, len(doc.findings)),
             "clean": not structural,
             "grounded": not violations,
+        }
+
+    def list_skills(self) -> list[dict]:
+        """只返回名字和描述——这是渐进披露的第一步。
+
+        不要把正文一起返回：10 个 skill 的全文可能有几万 token，
+        而模型此刻只需要判断"有没有适用的"。
+        """
+        return [meta.to_dict() for meta in self.skills.list()]
+
+    def read_skill(self, name: str) -> dict:
+        """加载完整 skill。只有 list_skills 判断相关时才该调用。"""
+        skill = self.skills.read(name)
+        return {
+            "name": skill.meta.name,
+            "description": skill.meta.description,
+            "body": skill.body[:8000],
+            "truncated": len(skill.body) > 8000,
+            "path": skill.meta.path,
         }
 
     def record_finding(
@@ -345,6 +370,20 @@ class Toolbox:
                 {"query": {"type": "string", "description": "自然语言问题，中英文均可"},
                  "top_k": {"type": "integer", "description": "默认 5"}},
                 ["query"],
+            ),
+            fn(
+                "list_skills",
+                "列出可用的 skill（只有名字和一句话描述）。开始任务前调用一次，"
+                "判断有没有适用的现成做法；不要在已知 skill 名时调用。",
+                {},
+                [],
+            ),
+            fn(
+                "read_skill",
+                "加载一个 skill 的完整内容。只有当 list_skills 的结果与本任务相关时才调用；"
+                "不要凭记忆编造 skill 内容。",
+                {"name": {"type": "string", "description": "list_skills 返回的 name"}},
+                ["name"],
             ),
             fn(
                 "build_design",
