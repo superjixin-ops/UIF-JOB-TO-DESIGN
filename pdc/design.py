@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 
 from pdc.checks import schema_diff
 from pdc.ir import DesignDoc, Finding, Sheet
@@ -48,7 +49,7 @@ def _credential_family(name: str) -> str:
     return ""
 
 
-def _size_note(specs: list[JobSpec]) -> str:
+def _size_note(specs: Sequence[JobSpec]) -> str:
     return " / ".join(f"{j.job_type}: {j.size}" for j in specs)
 
 

@@ -124,14 +124,14 @@ def execute_plan(
         if narrow_tools and schemas is not None and step.index > 1:
             step_schemas = [sc for sc in schemas if sc["function"]["name"] != "inspect_pipeline"]
 
-        result: AgentResult = run_agent(
+        step_result: AgentResult = run_agent(
             llm, toolbox, step_goal,
             max_steps=max_steps_per_step, system=system, schemas=step_schemas,
         )
-        step.result = result.output
-        step.steps_used = result.steps
-        total += result.steps
-        notes.append(f"[{step.title}] {result.output[:160]}")
+        step.result = step_result.output
+        step.steps_used = step_result.steps
+        total += step_result.steps
+        notes.append(f"[{step.title}] {step_result.output[:160]}")
 
     final = "\n".join(f"{s.index}. {s.title}：{s.result[:120]}" for s in plan)
     return PlanResult(plan=plan, final=final, total_steps=total)

@@ -14,7 +14,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 
@@ -24,7 +24,9 @@ CACHE_DIR = Path(__file__).resolve().parents[1] / "out" / "rag"
 
 class Embedder(Protocol):
     name: str
-    dim: int
+
+    @property
+    def dim(self) -> int: ...
 
     def encode(self, texts: list[str]) -> np.ndarray: ...
 
@@ -36,7 +38,7 @@ class FastEmbedder:
         self.name = model_name
         self.cache_dir = Path(cache_dir or CACHE_DIR)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self._model = None
+        self._model: Any = None
         self._dim = 0
 
     def _load(self):
@@ -78,7 +80,7 @@ class FastEmbedder:
         return arr
 
     @property
-    def dim(self) -> int:  # type: ignore[override]
+    def dim(self) -> int:
         return self._dim
 
 

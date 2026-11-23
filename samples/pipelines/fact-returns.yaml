@@ -1,0 +1,88 @@
+apiVersion: crd.example.io/v1
+kind: FactPipeline
+metadata:
+  name: fact-returns
+spec:
+  owner:
+    name: Demo
+    github: '@demo/analytics'
+    contact: demo@example.com
+  jobs:
+    - jobType: eid
+      extract:
+        - extractType: default
+          alias: RETURN_SOURCE
+          main_df: true
+          connections:
+            - credentials: demo-jdbc
+              connector: jdbc
+              query: OPS_RETURNS
+        - extractType: default
+          alias: REASON_REF
+          main_df: false
+          connections:
+            - credentials: demo-api
+              connector: skapi
+              query: RETURN_REASON_REFERENCE
+              keyName: REASON_KEY
+              naturalKey:
+                - REASON_CODE
+      transform:
+        - transformType: JoinByExpression
+          objectNames:
+            - RETURN_SOURCE
+            - REASON_REF
+          joinExpression: RETURN_SOURCE.REASON_CODE = REASON_REF.REASON_CODE
+          joinType: left
+          columnsToSelect:
+            - RETURN_SOURCE.*
+            - REASON_REF.REASON_KEY as SK_REASON
+          aliasResult: RETURN_SOURCE
+        - transformType: SparkSql
+          objectNames:
+            - RETURN_SOURCE
+          query: |
+            SELECT
+              RETURN_ID,
+              ORDER_ID,
+              CAST(RETURN_AMOUNT AS DECIMAL(18,2)) AS RETURN_AMOUNT,
+              SK_REASON,
+              RETURN_TS
+            FROM RETURN_SOURCE
+            WHERE RETURN_AMOUNT > 0
+          aliasResult: RETURN_SOURCE
+      load:
+        metadata:
+          name: FACT_RETURNS
+          documentation: customer returns fact
+        schema:
+          - columnName: RETURN_ID
+            dataType: StringType
+            nullAble: false
+          - columnName: ORDER_ID
+            dataType: StringType
+            nullAble: false
+          - columnName: RETURN_AMOUNT
+            dataType: DecimalType
+            dataTypeArgs:
+              precision: 18
+              scale: 2
+            nullAble: false
+          - columnName: SK_REASON
+            dataType: IntegerType
+            nullAble: true
+          - columnName: RETURN_TS
+            dataType: TimestampType
+            nullAble: false
+        connections:
+          - credentials: demo-cos
+            connector: cos
+            mode: append
+            loadObject: FACT_RETURNS
+            numPartitions: 32
+            partitionBy:
+              - RETURN_TS
+            alias: COMMERCE_CURATED
+            query: fact/FACT_RETURNS
+      setups:
+        size: L

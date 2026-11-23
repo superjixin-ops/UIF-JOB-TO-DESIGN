@@ -174,8 +174,8 @@ def check(spec: DesignSpec, facts: PipelineFacts) -> list[SpecViolation]:
                 )
 
         # 分区列必须真的在 schema 里
-        load = facts.job(job).load  # type: ignore[union-attr]
-        for pcol in load.partition_by:
+        load = job_facts.load if job_facts else None
+        for pcol in load.partition_by if load else ():
             if pcol not in want:
                 out.append(
                     SpecViolation(
@@ -204,27 +204,27 @@ def check(spec: DesignSpec, facts: PipelineFacts) -> list[SpecViolation]:
     yaml_extracts = {
         (j.job_type, e.alias): e for j in facts.jobs for e in j.extracts
     }
-    for want in spec.extracts:
-        got = yaml_extracts.get((want.job, want.alias))
-        if got is None:
+    for want_ex in spec.extracts:
+        got_ex = yaml_extracts.get((want_ex.job, want_ex.alias))
+        if got_ex is None:
             continue  # S_EXTRACT_MISSING 已报
         wrong: list[str] = []
-        if want.extract_type and want.extract_type != got.extract_type:
-            wrong.append(f"extractType: {got.extract_type!r} != {want.extract_type!r}")
-        if want.conn_alias and want.conn_alias != got.conn_alias:
-            wrong.append(f"connections[].alias: {got.conn_alias!r} != {want.conn_alias!r}")
-        if want.key_name and want.key_name != got.key_name:
-            wrong.append(f"connections[].keyName: {got.key_name!r} != {want.key_name!r}")
-        if want.flags and _norm_param(dict(want.flags)) != _norm_param(dict(got.flags)):
+        if want_ex.extract_type and want_ex.extract_type != got_ex.extract_type:
+            wrong.append(f"extractType: {got_ex.extract_type!r} != {want_ex.extract_type!r}")
+        if want_ex.conn_alias and want_ex.conn_alias != got_ex.conn_alias:
+            wrong.append(f"connections[].alias: {got_ex.conn_alias!r} != {want_ex.conn_alias!r}")
+        if want_ex.key_name and want_ex.key_name != got_ex.key_name:
+            wrong.append(f"connections[].keyName: {got_ex.key_name!r} != {want_ex.key_name!r}")
+        if want_ex.flags and _norm_param(dict(want_ex.flags)) != _norm_param(dict(got_ex.flags)):
             wrong.append(
-                f"connections[].requestFlags: {dict(got.flags)} != {dict(want.flags)}"
+                f"connections[].requestFlags: {dict(got_ex.flags)} != {dict(want_ex.flags)}"
             )
         if wrong:
             out.append(
                 SpecViolation(
                     "S_EXTRACT_PARAMS",
-                    f"{want.job}.{want.alias}: " + "；".join(wrong),
-                    where=want.job,
+                    f"{want_ex.job}.{want_ex.alias}: " + "；".join(wrong),
+                    where=want_ex.job,
                 )
             )
 
@@ -361,36 +361,36 @@ def check(spec: DesignSpec, facts: PipelineFacts) -> list[SpecViolation]:
             )
         # 连接级：并行度、别名、表空间。写错并行度不一定报错，但会改变写入行为。
         for spec_load in [x for x in spec.loads if x.job == job]:
-            wrong: list[str] = []
+            wrong_load: list[str] = []
             if spec_load.partitions is not None and spec_load.partitions != j.load.partitions:
-                wrong.append(
+                wrong_load.append(
                     f"connections[].numPartitions: {j.load.partitions} != {spec_load.partitions}"
                 )
             if spec_load.conn_alias and spec_load.conn_alias != j.load.conn_alias:
-                wrong.append(
+                wrong_load.append(
                     f"connections[].alias: {j.load.conn_alias!r} != {spec_load.conn_alias!r}"
                 )
             if spec_load.table_space and spec_load.table_space != j.load.table_space:
-                wrong.append(
+                wrong_load.append(
                     f"connections[].tableSpace: {j.load.table_space!r} != {spec_load.table_space!r}"
                 )
             if spec_load.connector and spec_load.connector != j.load.connector:
-                wrong.append(
+                wrong_load.append(
                     f"connections[].connector: {j.load.connector!r} != {spec_load.connector!r}"
                 )
             if spec_load.credentials and spec_load.credentials != j.load.credentials:
-                wrong.append(
+                wrong_load.append(
                     f"connections[].credentials: {j.load.credentials!r} != "
                     f"{spec_load.credentials!r}（写错 connector 会写到别的系统）"
                 )
             if spec_load.flip_alias != j.load.flip_alias:
-                wrong.append(
+                wrong_load.append(
                     f"connections[].flipAlias: {j.load.flip_alias} != {spec_load.flip_alias}"
                 )
-            if wrong:
+            if wrong_load:
                 out.append(
                     SpecViolation(
-                        "S_LOAD_PARAMS", f"{job}: " + "；".join(wrong), where=job
+                        "S_LOAD_PARAMS", f"{job}: " + "；".join(wrong_load), where=job
                     )
                 )
 

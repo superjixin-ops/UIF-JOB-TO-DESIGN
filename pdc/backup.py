@@ -76,10 +76,10 @@ def create(
     """把若干 SQLite 文件打成一份带 manifest 的 tar.gz，并按数量轮转。"""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    sources = [Path(p) for p in (sources or ["out/jobs.db", "out/audit.db"])]
-    existing = [p for p in sources if p.exists()]
+    src_paths = [Path(p) for p in (sources or ["out/jobs.db", "out/audit.db"])]
+    existing = [p for p in src_paths if p.exists()]
     if not existing:
-        raise FileNotFoundError(f"没有可备份的数据库：{[str(p) for p in sources]}")
+        raise FileNotFoundError(f"没有可备份的数据库：{[str(p) for p in src_paths]}")
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
     archive = out / f"backup-{stamp}.tar.gz"

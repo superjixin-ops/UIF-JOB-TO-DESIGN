@@ -1,0 +1,89 @@
+apiVersion: crd.example.io/v1
+kind: FactPipeline
+metadata:
+  name: fact-shipment-tracking
+spec:
+  owner:
+    name: Demo
+    github: '@demo/analytics'
+    contact: demo@example.com
+  jobs:
+    - jobType: eid
+      extract:
+        - extractType: default
+          alias: SHIPMENT_EVENT
+          main_df: true
+          connections:
+            - credentials: demo-cos
+              connector: cos
+              alias: LOGISTICS_LANDING
+              query: landing/logistics/shipment_event/transform.parquet
+        - extractType: default
+          alias: CARRIER_REF
+          main_df: false
+          connections:
+            - credentials: demo-api
+              connector: erdm_api
+              query: 4107/json
+              fields:
+                - carrierCd
+                - carrierName
+                - serviceLevel
+      transform:
+        - transformType: RenameColumns
+          objectNames:
+            - CARRIER_REF
+          mapColumns:
+            carrierCd: CARRIER_CODE
+            carrierName: CARRIER_NAME
+            serviceLevel: SERVICE_LEVEL
+          aliasResult: CARRIER_REF
+        - transformType: JoinByExpression
+          objectNames:
+            - SHIPMENT_EVENT
+            - CARRIER_REF
+          joinExpression: SHIPMENT_EVENT.CARRIER_CODE = CARRIER_REF.CARRIER_CODE
+          joinType: left
+          columnsToSelect:
+            - SHIPMENT_EVENT.*
+            - CARRIER_REF.CARRIER_NAME
+            - CARRIER_REF.SERVICE_LEVEL
+          aliasResult: SHIPMENT_EVENT
+      load:
+        metadata:
+          name: FACT_SHIPMENT_TRACKING
+          documentation: shipment tracking events with carrier attributes
+        schema:
+          - columnName: SHIPMENT_ID
+            dataType: StringType
+            nullAble: false
+          - columnName: TRACKING_NUMBER
+            dataType: StringType
+            nullAble: true
+          - columnName: CARRIER_CODE
+            dataType: StringType
+            nullAble: false
+          - columnName: CARRIER_NAME
+            dataType: StringType
+            nullAble: true
+          - columnName: SERVICE_LEVEL
+            dataType: StringType
+            nullAble: true
+          - columnName: EVENT_TS
+            dataType: TimestampType
+            nullAble: false
+          - columnName: EVENT_STATUS
+            dataType: StringType
+            nullAble: false
+        connections:
+          - credentials: demo-cos
+            connector: cos
+            mode: append
+            loadObject: FACT_SHIPMENT_TRACKING
+            numPartitions: 16
+            partitionBy:
+              - EVENT_TS
+            alias: LOGISTICS_CURATED
+            query: fact/FACT_SHIPMENT_TRACKING
+      setups:
+        size: M

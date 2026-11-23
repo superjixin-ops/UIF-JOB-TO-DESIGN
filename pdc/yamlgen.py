@@ -191,7 +191,7 @@ class BuildTools:
         return {"requirements": self.req.prompt, "warnings": list(self.req.warnings)}
 
     def list_examples(self, keyword: str = "") -> list[dict]:
-        out = []
+        out: list[dict] = []
         kw = keyword.lower()
         if not self.examples_dir.exists():
             return out
@@ -581,12 +581,12 @@ def run_build(
             # 实测连续 36 次 read_example、一次都没写 YAML。
             # 保留两份就稳定了，因为模型总能看到"当前参照 + 上一条对照"。
             seen = [
-                m
-                for m in messages
-                if m.get("role") == "tool" and m.get("name") == "read_example"
+                msg
+                for msg in messages
+                if msg.get("role") == "tool" and msg.get("name") == "read_example"
             ]
-            for m in seen[:-2]:
-                m["content"] = "（更早读取的示例已省略）"
+            for msg in seen[:-2]:
+                msg["content"] = "（更早读取的示例已省略）"
 
         for call in calls:
             res = tools.call(call.name, call.arguments)

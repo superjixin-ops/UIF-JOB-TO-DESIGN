@@ -1,0 +1,87 @@
+apiVersion: crd.example.io/v1
+kind: DimensionPipeline
+metadata:
+  name: dim-promotion
+spec:
+  owner:
+    name: Demo
+    github: '@demo/analytics'
+    contact: demo@example.com
+  jobs:
+    - jobType: eid
+      extract:
+        - extractType: default
+          alias: PROMOTION_SOURCE
+          main_df: true
+          connections:
+            - credentials: demo-cos
+              connector: cos
+              alias: MARKETING_LANDING
+              query: landing/marketing/promotion/transform.parquet
+        - extractType: default
+          alias: PROMOTION_CHANNEL
+          main_df: false
+          connections:
+            - credentials: demo-api
+              connector: skapi
+              query: CHANNEL_REFERENCE
+              keyName: CHANNEL_KEY
+              naturalKey:
+                - CHANNEL_CODE
+      transform:
+        - transformType: JoinByExpression
+          objectNames:
+            - PROMOTION_SOURCE
+            - PROMOTION_CHANNEL
+          joinExpression: PROMOTION_SOURCE.CHANNEL_CODE = PROMOTION_CHANNEL.CHANNEL_CODE
+          joinType: left
+          columnsToSelect:
+            - PROMOTION_SOURCE.*
+            - PROMOTION_CHANNEL.CHANNEL_KEY as SK_CHANNEL
+          aliasResult: PROMOTION_SOURCE
+        - transformType: Trim
+          objectNames:
+            - PROMOTION_SOURCE
+          columns:
+            - PROMOTION_NAME
+            - CHANNEL_CODE
+          aliasResult: PROMOTION_SOURCE
+      load:
+        metadata:
+          name: PROMOTION_DIMENSION
+          documentation: promotion master with channel key
+        schema:
+          - columnName: PROMOTION_CODE
+            dataType: StringType
+            nullAble: false
+          - columnName: PROMOTION_NAME
+            dataType: StringType
+            nullAble: false
+          - columnName: CHANNEL_CODE
+            dataType: StringType
+            nullAble: true
+          - columnName: SK_CHANNEL
+            dataType: IntegerType
+            nullAble: true
+          - columnName: DISCOUNT_PCT
+            dataType: DecimalType
+            dataTypeArgs:
+              precision: 5
+              scale: 2
+            nullAble: true
+          - columnName: START_DATE
+            dataType: DateType
+            nullAble: false
+          - columnName: END_DATE
+            dataType: DateType
+            nullAble: true
+        connections:
+          - credentials: demo-cos
+            connector: cos
+            mode: overwrite
+            loadObject: PROMOTION_DIMENSION
+            numPartitions: 2
+            alias: ANALYTICS
+            query: dimension/PROMOTION_DIMENSION/transform.parquet
+      setups:
+        size: S

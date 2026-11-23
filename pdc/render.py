@@ -33,7 +33,9 @@ def _clean(value: str) -> str:
 def render_xlsx(doc: DesignDoc, out_path: str | Path) -> Path:
     out_path = Path(out_path)
     wb = Workbook()
-    wb.remove(wb.active)
+    default_sheet = wb.active
+    if default_sheet is not None:
+        wb.remove(default_sheet)
 
     for sheet in doc.sheets:
         ws = wb.create_sheet(sheet.name[:31])

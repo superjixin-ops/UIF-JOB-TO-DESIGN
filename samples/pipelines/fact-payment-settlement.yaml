@@ -1,0 +1,115 @@
+apiVersion: crd.example.io/v1
+kind: FactPipeline
+metadata:
+  name: fact-payment-settlement
+spec:
+  owner:
+    name: Demo
+    github: '@demo/analytics'
+    contact: demo@example.com
+  jobs:
+    - jobType: eid
+      extract:
+        - extractType: default
+          alias: SETTLEMENT_LINE
+          main_df: true
+          connections:
+            - credentials: demo-cos
+              connector: cos
+              alias: FINANCE_LANDING
+              query: landing/finance/settlement_line/transform.parquet
+        - extractType: default
+          alias: PAYMENT_METHOD
+          main_df: false
+          connections:
+            - credentials: demo-api
+              connector: skapi
+              query: PAYMENT_METHOD_DIMENSION
+              keyName: METHOD_KEY
+              naturalKey:
+                - METHOD_CODE
+        - extractType: default
+          alias: FX_RATE
+          main_df: false
+          connections:
+            - credentials: demo-jdbc
+              connector: jdbc
+              query: REF_FX_RATE
+      transform:
+        - transformType: JoinByExpression
+          objectNames:
+            - SETTLEMENT_LINE
+            - PAYMENT_METHOD
+          joinExpression: SETTLEMENT_LINE.METHOD_CODE = PAYMENT_METHOD.METHOD_CODE
+          joinType: left
+          columnsToSelect:
+            - SETTLEMENT_LINE.*
+            - PAYMENT_METHOD.METHOD_KEY as SK_METHOD
+          aliasResult: SETTLEMENT_LINE
+        - transformType: JoinByExpression
+          objectNames:
+            - SETTLEMENT_LINE
+            - FX_RATE
+          joinExpression: SETTLEMENT_LINE.CURRENCY_CODE = FX_RATE.CURRENCY_CODE
+          joinType: inner
+          columnsToSelect:
+            - SETTLEMENT_LINE.*
+            - FX_RATE.RATE_TO_USD
+          aliasResult: SETTLEMENT_LINE
+        - transformType: UniqueID
+          objectNames:
+            - SETTLEMENT_LINE
+          columns:
+            - SETTLEMENT_KEY
+          mode: overwrite
+          aliasResult: SETTLEMENT_LINE
+      load:
+        metadata:
+          name: FACT_PAYMENT_SETTLEMENT
+          documentation: payment settlement with fx conversion
+        schema:
+          - columnName: SETTLEMENT_KEY
+            dataType: LongType
+            nullAble: false
+          - columnName: SETTLEMENT_TS
+            dataType: TimestampType
+            nullAble: false
+          - columnName: PAYMENT_ID
+            dataType: StringType
+            nullAble: false
+          - columnName: CURRENCY_CODE
+            dataType: StringType
+            nullAble: false
+          - columnName: SK_METHOD
+            dataType: IntegerType
+            nullAble: true
+          - columnName: GROSS_AMOUNT
+            dataType: DecimalType
+            dataTypeArgs:
+              precision: 18
+              scale: 2
+            nullAble: false
+          - columnName: RATE_TO_USD
+            dataType: DecimalType
+            dataTypeArgs:
+              precision: 12
+              scale: 6
+            nullAble: false
+          - columnName: NET_AMOUNT_USD
+            dataType: DecimalType
+            dataTypeArgs:
+              precision: 18
+              scale: 2
+            nullAble: true
+        connections:
+          - credentials: demo-cos
+            connector: cos
+            mode: append
+            loadObject: FACT_PAYMENT_SETTLEMENT
+            numPartitions: 64
+            partitionBy:
+              - SETTLEMENT_TS
+            alias: FINANCE_CURATED
+            query: fact/FACT_PAYMENT_SETTLEMENT
+      setups:
+        size: XL

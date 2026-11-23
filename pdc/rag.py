@@ -12,9 +12,15 @@ import math
 import re
 from collections import Counter
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pdc.paths import rules_dir as _rules_dir
 from pdc.paths import skills_dir as _skills_dir
+
+if TYPE_CHECKING:
+    import numpy as np
+
+    from pdc.embed import Embedder
 
 DEFAULT_RULES = _rules_dir()
 DEFAULT_SKILLS = _skills_dir()
@@ -135,8 +141,8 @@ class HybridRetriever:
         # 之前把两者混成一个字段，导致 A/B 测试里 bm25 组被误报为降级。
         self.disabled = not enabled
         self.degraded = False
-        self._embedder = None
-        self._vectors = None
+        self._embedder: Embedder | None = None
+        self._vectors: np.ndarray | None = None
         self._ids: list[str] = []
 
     @property
@@ -156,9 +162,10 @@ class HybridRetriever:
         try:
             from pdc.embed import FastEmbedder
 
-            self._embedder = FastEmbedder(self.model_name)
+            embedder = FastEmbedder(self.model_name)
+            self._embedder = embedder
             texts = [c["text"] for c in self.index.chunks]
-            self._vectors = self._embedder.encode(texts)
+            self._vectors = embedder.encode(texts)
             self._ids = [c["id"] for c in self.index.chunks]
             return True
         except Exception:  # noqa: BLE001 - 任何原因失败都降级，不能让 Agent 崩
@@ -186,6 +193,7 @@ class HybridRetriever:
 
         import numpy as np
 
+        assert self._embedder is not None
         qv = self._embedder.encode([query])[0]
         sims = self._vectors @ qv
         order = np.argsort(-sims)

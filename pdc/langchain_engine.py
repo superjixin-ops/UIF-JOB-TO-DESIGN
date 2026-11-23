@@ -29,7 +29,7 @@ import json
 import os
 from typing import Any
 
-from pydantic import create_model
+from pydantic import SecretStr, create_model
 
 from pdc.tools import Toolbox
 
@@ -119,9 +119,8 @@ class _TracerCallback:
                 self.tracer = tracer
 
             def on_llm_end(self, response, **kwargs) -> None:
-                usage = {}
                 llm_output = getattr(response, "llm_output", None) or {}
-                usage = llm_output.get("token_usage") or {}
+                usage: dict[str, Any] = llm_output.get("token_usage") or {}
                 self.tracer.record(
                     "llm",
                     "langchain",
@@ -156,7 +155,7 @@ def run_langchain(
     llm = ChatOpenAI(
         model=model,
         temperature=0,
-        api_key=api_key,
+        api_key=SecretStr(api_key),
         base_url=os.getenv("OPENAI_BASE_URL") or None,
     )
     agent = create_agent(model=llm, tools=build_tools(toolbox), system_prompt=SYSTEM)
@@ -167,7 +166,7 @@ def run_langchain(
     from langgraph.errors import GraphRecursionError
 
     try:
-        result = agent.invoke(
+        result = agent.invoke(  # type: ignore[call-overload]
             {"messages": [{"role": "user", "content": goal}]},
             config={
                 "recursion_limit": max(20, max_steps * 4),

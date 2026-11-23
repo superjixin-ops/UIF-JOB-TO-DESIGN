@@ -154,9 +154,13 @@ class SqliteVecStore:
         return out
 
     def reset(self) -> None:
-        """全量重建时清空。TRUNCATE 比 DELETE 快，且重置自增序列。"""
-        with self._conn.cursor() as cur:
-            cur.execute(f"TRUNCATE {self.table}")
+        """全量重建时清空。
+
+        注意：sqlite-vec 的 vec0 是虚拟表，没有 TRUNCATE，也没有自增序列可重置；
+        这里是 SQLite 不是 Postgres，只能 DELETE。
+        """
+        self._conn.execute("DELETE FROM items")
+        self._conn.commit()
 
     def delete(self, ids: list[str]) -> int:
         if not ids:
@@ -167,7 +171,8 @@ class SqliteVecStore:
         return int(cur.rowcount or 0)
 
     def count(self) -> int:
-        return int(self._conn.execute("SELECT count(*) FROM items").fetchone()[0])
+        row = self._conn.execute("SELECT count(*) FROM items").fetchone()
+        return int(row[0]) if row else 0
 
     def close(self) -> None:
         self._conn.close()
@@ -279,7 +284,8 @@ class PgVectorStore:
     def count(self) -> int:
         with self._conn.cursor() as cur:
             cur.execute(f"SELECT count(*) FROM {self.table}")
-            return int(cur.fetchone()[0])
+            row = cur.fetchone()
+            return int(row[0]) if row else 0
 
     def close(self) -> None:
         self._conn.close()

@@ -1,0 +1,100 @@
+apiVersion: crd.example.io/v1
+kind: DimensionPipeline
+metadata:
+  name: dim-store
+spec:
+  owner:
+    name: Demo
+    github: '@demo/analytics'
+    contact: demo@example.com
+  jobs:
+    - jobType: eid
+      extract:
+        - extractType: default
+          alias: STORE_SOURCE
+          main_df: true
+          connections:
+            - credentials: demo-api
+              connector: erdm_api
+              query: 3012/json
+              fields:
+                - storeNbr
+                - storeName
+                - regionCode
+                - districtCode
+                - openDate
+                - closeDate
+                - activeFlag
+      transform:
+        - transformType: RenameColumns
+          objectNames:
+            - STORE_SOURCE
+          mapColumns:
+            storeNbr: STORE_NUMBER
+            storeName: STORE_NAME
+            regionCode: REGION_CODE
+            districtCode: DISTRICT_CODE
+            openDate: OPEN_DATE
+            closeDate: CLOSE_DATE
+            activeFlag: ACTIVE_FLAG
+          aliasResult: STORE_SOURCE
+        - transformType: Trim
+          objectNames:
+            - STORE_SOURCE
+          columns:
+            - STORE_NAME
+            - REGION_CODE
+            - DISTRICT_CODE
+          aliasResult: STORE_SOURCE
+        - transformType: AddSurrogateKey
+          objectNames:
+            - STORE_SOURCE
+          surrogateKeyName: SURROGATE_KEY
+          dimensionName: STORE_DIMENSION
+          naturalKeys:
+            - STORE_NUMBER
+          deltaColumns:
+            - STORE_NAME
+            - REGION_CODE
+            - DISTRICT_CODE
+            - ACTIVE_FLAG
+          aliasResult: STORE_SOURCE
+      load:
+        metadata:
+          name: STORE_DIMENSION
+          documentation: store master data
+        schema:
+          - columnName: SURROGATE_KEY
+            dataType: IntegerType
+            nullAble: false
+          - columnName: STORE_NUMBER
+            dataType: StringType
+            nullAble: false
+          - columnName: STORE_NAME
+            dataType: StringType
+            nullAble: false
+          - columnName: REGION_CODE
+            dataType: StringType
+            nullAble: true
+          - columnName: DISTRICT_CODE
+            dataType: StringType
+            nullAble: true
+          - columnName: OPEN_DATE
+            dataType: DateType
+            nullAble: true
+          - columnName: CLOSE_DATE
+            dataType: DateType
+            nullAble: true
+          - columnName: ACTIVE_FLAG
+            dataType: StringType
+            nullAble: false
+        connections:
+          - credentials: demo-cos
+            connector: cos
+            mode: overwrite
+            loadObject: STORE_DIMENSION
+            numPartitions: 4
+            alias: ANALYTICS
+            query: dimension/STORE_DIMENSION/transform.parquet
+      setups:
+        size: M

@@ -1,0 +1,72 @@
+apiVersion: crd.example.io/v1
+kind: DimensionPipeline
+metadata:
+  name: dim-currency
+spec:
+  owner:
+    name: Demo
+    github: '@demo/analytics'
+    contact: demo@example.com
+  jobs:
+    - jobType: eid
+      extract:
+        - extractType: default
+          alias: CURRENCY_SOURCE
+          main_df: true
+          connections:
+            - credentials: demo-jdbc
+              connector: jdbc
+              query: REF_CURRENCY
+              naturalKey:
+                - CURRENCY_CD
+      transform:
+        - transformType: RenameColumns
+          objectNames:
+            - CURRENCY_SOURCE
+          mapColumns:
+            CURRENCY_CD: CURRENCY_CODE
+            CURRENCY_NM: CURRENCY_NAME
+            ISO_NUM: ISO_NUMERIC_CODE
+            EXCH_RATE: EXCHANGE_RATE
+            EFF_DT: EFFECTIVE_DATE
+          aliasResult: CURRENCY_SOURCE
+        - transformType: Trim
+          objectNames:
+            - CURRENCY_SOURCE
+          columns:
+            - CURRENCY_CODE
+            - CURRENCY_NAME
+          aliasResult: CURRENCY_SOURCE
+      load:
+        metadata:
+          name: CURRENCY_DIMENSION
+          documentation: currency reference with exchange rate
+        schema:
+          - columnName: CURRENCY_CODE
+            dataType: StringType
+            nullAble: false
+          - columnName: CURRENCY_NAME
+            dataType: StringType
+            nullAble: false
+          - columnName: ISO_NUMERIC_CODE
+            dataType: StringType
+            nullAble: true
+          - columnName: EXCHANGE_RATE
+            dataType: DecimalType
+            dataTypeArgs:
+              precision: 12
+              scale: 6
+            nullAble: true
+          - columnName: EFFECTIVE_DATE
+            dataType: DateType
+            nullAble: false
+        connections:
+          - credentials: demo-cos
+            connector: cos
+            mode: overwrite
+            loadObject: CURRENCY_DIMENSION
+            numPartitions: 1
+            alias: ANALYTICS
+            query: dimension/CURRENCY_DIMENSION/transform.parquet
+      setups:
+        size: S

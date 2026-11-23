@@ -144,20 +144,22 @@ def test_incremental_update_embeds_only_changes(tmp_path) -> None:
     out = tmp_path / "index"
     build(repo, out, backend="numpy", offline_embed=True)
 
+    # 样本数量会变（4 -> 12），写死数字的测试会在加样本时误报。
+    n = len(list(repo.glob("*.yaml")))
     noop = update(repo, out, offline_embed=True)
-    assert noop["embedded"] == 0 and noop["count"] == 4
+    assert noop["embedded"] == 0 and noop["count"] == n
 
     target = repo / "fact-order-fulfillment.yaml"
     target.write_text(target.read_text(encoding="utf-8").replace("jobType: eid", "jobType: eid-v2", 1))
     changed = update(repo, out, offline_embed=True)
     assert changed["changed"] == 1
     assert changed["embedded"] == 1
-    assert changed["count"] == 4
+    assert changed["count"] == n
 
     (repo / "dim-product-family.yaml").unlink()
     removed = update(repo, out, offline_embed=True)
     assert removed["removed"] == 1
-    assert removed["count"] == 3
+    assert removed["count"] == n - 1
     assert removed["embedded"] == 0
 
 
@@ -168,13 +170,14 @@ def test_incremental_update_sqlite_backend(tmp_path) -> None:
     out = tmp_path / "index"
     build(repo, out, backend="sqlite-vec", offline_embed=True)
 
+    n = len(list(repo.glob("*.yaml")))
     noop = update(repo, out, offline_embed=True)
-    assert noop["embedded"] == 0 and noop["count"] == 4
+    assert noop["embedded"] == 0 and noop["count"] == n
 
     target = repo / "fact-order-fulfillment.yaml"
     target.write_text(target.read_text(encoding="utf-8").replace("jobType: eid", "jobType: eid-v2", 1))
     changed = update(repo, out, offline_embed=True)
-    assert changed["changed"] == 1 and changed["count"] == 4
+    assert changed["changed"] == 1 and changed["count"] == n
 
 
 def test_update_bootstraps_when_index_missing(tmp_path) -> None:
@@ -184,4 +187,24 @@ def test_update_bootstraps_when_index_missing(tmp_path) -> None:
     out = tmp_path / "index"
     result = update(repo, out, offline_embed=True)
     assert result["mode"] == "full"
-    assert result["count"] == 4
+    assert result["count"] == len(list(repo.glob("*.yaml")))
+
+
+def test_sqlite_reset_clears_index(tmp_path) -> None:
+    """reset() 曾经写的是 Postgres 语法（TRUNCATE + self.table）。
+
+    在 sqlite-vec 上会抛 AttributeError，而 search.py 的全量重建正好会调它。
+    因为没有任何用例调用过 SqliteVecStore.reset()，这条路径一直是坏的，
+    直到接上 mypy 才暴露（PgVectorStore.reset 被测过，掩盖了问题）。
+    """
+    store = SqliteVecStore(tmp_path / "v.db", dim=8)
+    store.add(_items(n=10))
+    assert store.count() == 10
+
+    store.reset()
+    assert store.count() == 0
+
+    # 清空后还能继续写入，说明表结构没被破坏
+    store.add(_items(n=3, seed=1))
+    assert store.count() == 3
+    store.close()

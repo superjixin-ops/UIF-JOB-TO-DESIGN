@@ -45,7 +45,7 @@ class MCPClient:
         self.tools: list[dict] = []
 
     # ------------------------------------------------------------------
-    def start(self) -> MCPClient:
+    def start(self) -> Self:
         self._proc = subprocess.Popen(
             self.command,
             stdin=subprocess.PIPE,

@@ -1,0 +1,66 @@
+apiVersion: crd.example.io/v1
+kind: DimensionPipeline
+metadata:
+  name: dim-date
+spec:
+  owner:
+    name: Demo
+    github: '@demo/analytics'
+    contact: demo@example.com
+  jobs:
+    - jobType: eid
+      extract:
+        - extractType: default
+          alias: DATE_SOURCE
+          main_df: true
+          connections:
+            - credentials: demo-api
+              connector: skapi
+              query: DATE_DIMENSION
+      transform:
+        - transformType: Select
+          objectNames:
+            - DATE_SOURCE
+          columns:
+            - DATE_KEY
+            - CALENDAR_DATE
+            - FISCAL_YEAR
+            - FISCAL_QUARTER
+            - IS_BUSINESS_DAY
+          aliasResult: DATE_SOURCE
+        - transformType: Trim
+          objectNames:
+            - DATE_SOURCE
+          columns:
+            - FISCAL_QUARTER
+          aliasResult: DATE_SOURCE
+      load:
+        metadata:
+          name: DATE_DIMENSION
+          documentation: calendar date dimension
+        schema:
+          - columnName: DATE_KEY
+            dataType: IntegerType
+            nullAble: false
+          - columnName: CALENDAR_DATE
+            dataType: DateType
+            nullAble: false
+          - columnName: FISCAL_YEAR
+            dataType: IntegerType
+            nullAble: false
+          - columnName: FISCAL_QUARTER
+            dataType: StringType
+            nullAble: true
+          - columnName: IS_BUSINESS_DAY
+            dataType: BooleanType
+            nullAble: false
+        connections:
+          - credentials: demo-cos
+            connector: cos
+            mode: overwrite
+            loadObject: DATE_DIMENSION
+            numPartitions: 1
+            alias: ANALYTICS
+            query: dimension/DATE_DIMENSION/transform.parquet
+      setups:
+        size: T

@@ -39,10 +39,16 @@ jobs:
       - name: Lint
         run: uv run ruff check pdc
 
+      # 这一步以前缺失：mypy 一直躺在 dev 依赖里，却从来没人运行。
+      # 第一次接上就抓到 70 个问题，其中 1 个是真 bug
+      # （SqliteVecStore.reset 用了 Postgres 的 TRUNCATE）。
+      - name: Type check
+        run: uv run mypy
+
       - name: Test
         env:
           PDC_TEST_PG_DSN: postgresql://postgres:pdc@localhost:5433/pdc
-        run: uv run pytest -q
+        run: uv run pytest -q --cov=pdc --cov-report=term-missing
 
       # 只跑 pytest 不够：用例可能被 skip 掉，而 skip 也是绿。
       # 这一步要求 pgvector 集成用例必须真的 passed。

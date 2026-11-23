@@ -1,0 +1,93 @@
+apiVersion: crd.example.io/v1
+kind: FactPipeline
+metadata:
+  name: fact-sales-daily
+spec:
+  owner:
+    name: Demo
+    github: '@demo/analytics'
+    contact: demo@example.com
+  jobs:
+    - jobType: eid
+      extract:
+        - extractType: default
+          alias: SALES_LINE
+          main_df: true
+          connections:
+            - credentials: demo-cos
+              connector: cos
+              alias: COMMERCE_LANDING
+              query: landing/commerce/sales_line/transform.parquet
+        - extractType: default
+          alias: PRODUCT_DIM
+          main_df: false
+          connections:
+            - credentials: demo-api
+              connector: skapi
+              query: PRODUCT_DIMENSION
+              keyName: SURROGATE_KEY
+              naturalKey:
+                - PRODUCT_CODE
+      transform:
+        - transformType: JoinByExpression
+          objectNames:
+            - SALES_LINE
+            - PRODUCT_DIM
+          joinExpression: SALES_LINE.PRODUCT_CODE = PRODUCT_DIM.PRODUCT_CODE
+          joinType: left
+          columnsToSelect:
+            - SALES_LINE.*
+            - PRODUCT_DIM.SURROGATE_KEY as SK_PRODUCT
+            - PRODUCT_DIM.FAMILY_CODE
+          aliasResult: SALES_LINE
+        - transformType: UniqueID
+          objectNames:
+            - SALES_LINE
+          columns:
+            - SALES_LINE_KEY
+          mode: overwrite
+          aliasResult: SALES_LINE
+      load:
+        metadata:
+          name: FACT_SALES_DAILY
+          documentation: daily sales line fact
+        schema:
+          - columnName: SALES_LINE_KEY
+            dataType: LongType
+            nullAble: false
+          - columnName: SALES_DATE
+            dataType: DateType
+            nullAble: false
+          - columnName: ORDER_ID
+            dataType: StringType
+            nullAble: false
+          - columnName: PRODUCT_CODE
+            dataType: StringType
+            nullAble: false
+          - columnName: SK_PRODUCT
+            dataType: IntegerType
+            nullAble: true
+          - columnName: FAMILY_CODE
+            dataType: StringType
+            nullAble: true
+          - columnName: QUANTITY
+            dataType: IntegerType
+            nullAble: false
+          - columnName: NET_AMOUNT
+            dataType: DecimalType
+            dataTypeArgs:
+              precision: 18
+              scale: 2
+            nullAble: true
+        connections:
+          - credentials: demo-cos
+            connector: cos
+            mode: append
+            loadObject: FACT_SALES_DAILY
+            numPartitions: 64
+            partitionBy:
+              - SALES_DATE
+            alias: COMMERCE_CURATED
+            query: fact/FACT_SALES_DAILY
+      setups:
+        size: XL

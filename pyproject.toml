@@ -35,12 +35,30 @@ packages = ["pdc"]
 dev = [
     "mypy>=2.4.1",
     "pytest>=9.2.0",
+    "pytest-cov>=7.1.0",
     "ruff>=0.17.5",
+    "types-openpyxl>=3.1.5.20261122",
+    "types-pyyaml>=6.0.12.20261122",
 ]
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.mypy]
+python_version = "3.12"
+files = ["pdc"]
+# 没写类型注解的函数体也要检查：项目的注解是渐进的，
+# 关掉这个会让一半模块实际上没被检查。
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+# 这两个库没有 py.typed，也没有社区存根。
+# 只对它们放开，避免全局 ignore_missing_imports 把真问题也吞掉。
+module = ["sqlite_vec", "sqlite_vec.*", "fastembed", "fastembed.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

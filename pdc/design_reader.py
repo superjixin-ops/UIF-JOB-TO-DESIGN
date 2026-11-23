@@ -437,7 +437,7 @@ def read_design(path: str | Path) -> DesignSpec:
                         continue
                     raw_step = _cell(row, c_step)
                     try:
-                        step = int(raw_step)
+                        step = int(str(raw_step))
                     except (TypeError, ValueError):
                         step = len(transforms) + 1
                     raw_in = str(_cell(row, c_in)).strip()
@@ -498,7 +498,7 @@ def read_design(path: str | Path) -> DesignSpec:
                     continue
                 raw_parts = _cell(row, c_parts)
                 try:
-                    parts = int(raw_parts) if str(raw_parts).strip() not in ("", "-", "None") else None
+                    parts = int(str(raw_parts)) if str(raw_parts).strip() not in ("", "-", "None") else None
                 except (TypeError, ValueError):
                     parts = None
                 pby = tuple(
@@ -568,7 +568,7 @@ def read_design(path: str | Path) -> DesignSpec:
     # ---------- 合并成 loads ----------
     loads: list[SpecLoad] = []
     for t in targets:
-        cols = per_job_columns.get(t["job"], ())
+        job_cols = per_job_columns.get(t["job"], ())
         loads.append(
             SpecLoad(
                 job=t["job"],
@@ -583,15 +583,21 @@ def read_design(path: str | Path) -> DesignSpec:
                 connector=t.get("connector", ""),
                 credentials=t.get("credentials", ""),
                 flip_alias=bool(t.get("flip_alias", False)),
-                columns=cols,
-                schema_declared=bool(t["declared"] and cols),
+                columns=job_cols,
+                schema_declared=bool(t["declared"] and job_cols),
             )
         )
     # 文档里没有 Load Targets（老旧格式）时，用 Landing 表兜底
     if not loads:
-        for job, cols in per_job_columns.items():
+        for job, fallback_cols in per_job_columns.items():
             loads.append(
-                SpecLoad(job=job, object_name="", query="", columns=cols, schema_declared=bool(cols))
+                SpecLoad(
+                    job=job,
+                    object_name="",
+                    query="",
+                    columns=fallback_cols,
+                    schema_declared=bool(fallback_cols),
+                )
             )
         if loads:
             warnings.append("缺 Load Targets 表，load 目标从 Landing 表推断")

@@ -42,7 +42,7 @@ def _canonical(payload: dict) -> str:
 
 class AuditLog:
     def __init__(self, path: str | Path | None = None) -> None:
-        raw = path or os.getenv(AUDIT_ENV, "out/audit.db")
+        raw = path or os.getenv(AUDIT_ENV) or "out/audit.db"
         self.path = Path(raw)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()

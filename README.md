@@ -8,8 +8,8 @@
 |---|---|
 | 仓库 | [superjixin-ops/UIF-JOB-TO-DESIGN](https://github.com/superjixin-ops/UIF-JOB-TO-DESIGN) |
 | 在线演示 | `https://3eea34987613e6.app.lhr.life`（临时隧道，token `demo-token`） |
-| 规模 | **262 测试** · 47 模块 · 10,427 行主代码 + 3,556 行测试 |
-| 效果 | 设计文档 **4 小时 → 13 秒**；反向生成 **留一法 4/4 通过**，平均 2 轮、约 $0.02 一条；143 个键值与源文件零差异 |
+| 规模 | **271 测试通过 / 1 跳过** · 47 模块 · 10,427 行主代码 + 3,556 行测试 · mypy 0 错误 · 覆盖率 78% |
+| 效果 | 设计文档 **4 小时 → 13 秒**；反向生成 **留一法 4/4 通过**（4 条样本，样本集已扩到 12 条待重跑），平均 2 轮、约 $0.02 一条；143 个键值与源文件零差异 |
 | 技术栈 | Python 3.12 · FastAPI · asyncio · SQLite · LangGraph · LangChain · MCP · pgvector |
 
 ---
@@ -76,7 +76,7 @@ uv run python -m eval.fidelity samples/pipelines/fact-order-fulfillment.yaml out
 ```
 uv run python -m eval.build_eval --repeat 3
 
-pass_rate    1.00 ± 0.00     （12/12）
+pass_rate    1.00 ± 0.00     （4 条样本 × 3 次运行，12 次全过）
 avg_rounds   1.92 ± 0.14
 avg_tokens   69,341 ± 13,192
 exact_match  0.000 ± 0.000   （没有抄）
@@ -84,6 +84,19 @@ exact_match  0.000 ± 0.000   （没有抄）
 
 单次会跳（2 轮 / 3 轮 / 2 轮），所以报均值 ± 标准差，不报最好那次。
 连接级键值：源 143 个，缺/不同 **0** 个。
+
+> **样本量说明（别把它说成 12 条）**
+>
+> 上面这组数字来自 **4 条样本**，`12` 是 4 条 × 3 次重复的总运行次数。
+> 样本集现在已经扩到 **12 条**（`samples/pipelines/`），但重跑需要模型 key：
+>
+> ```
+> export OPENAI_API_KEY=sk-...
+> uv run python -m eval.build_eval --cases 12 --repeat 3
+> ```
+>
+> 重跑之前，对外只能说"4 条样本全过"。
+> 说"12 条全过"是把重复次数当成了样本量——这是评测里最常见的口径错误。
 
 完整记录见 [`docs/hallucination-and-testing.md`](docs/hallucination-and-testing.md)：
 
@@ -175,7 +188,7 @@ pdc/
 ops/       告警规则 + 检查脚本
 eval/      四指标评测 + 审计 golden set + 反向生成留一法 + 逐键保真审计
 rag/       检索评测（样例语料可复现）、α 扫描、A/B、引用分析
-tests/     262 个用例
+tests/     272 个用例（271 通过 / 1 跳过）
 loadtest/  并发压测
 samples/   虚构样例数据（可公开）
 scripts/   本地启动 + 隧道 + 语料结构统计
@@ -1260,3 +1273,7 @@ M1 的目标不是"让模型写得更好"，而是**让模型只做判断**：
 - 哪些问题是结构性的（该停下来找人）vs 可自动修的
 
 参考手册 3.10 节（自校验）和 4.7 节（常见坑）。
+
+## License
+
+MIT，见 [LICENSE](LICENSE)。

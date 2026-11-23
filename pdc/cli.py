@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-from pdc.agent import run_with_self_check
+from pdc.agent import AgentResult, run_with_self_check
 from pdc.checks import schema_diff
 from pdc.design import build_design
 from pdc.llm import OpenAICompatibleLLM, RuleBasedLLM
@@ -238,7 +238,7 @@ def cmd_agent(args: argparse.Namespace) -> int:
             schemas=toolbox.tool_schemas(),
         )
 
-        result = SimpleNamespace(
+        result: AgentResult | SimpleNamespace = SimpleNamespace(
             output=plan_result.final,
             steps=plan_result.total_steps,
             written={},
