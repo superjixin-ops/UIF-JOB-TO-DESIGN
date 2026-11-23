@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from pdc.llm import OpenAICompatibleLLM, _safe_json, _sanitize
+from pdc.llm import LLMTruncated, OpenAICompatibleLLM, _safe_json, _sanitize
 
 
 # ---------------------------------------------------------------- 消息清洗
@@ -68,15 +68,20 @@ class _FakeClient:
         self.chat = SimpleNamespace(completions=_FakeCompletions(behaviour))
 
 
-def _reply(content: str = "", calls: list[tuple[str, str, str]] | None = None):
+def _reply(
+    content: str = "",
+    calls: list[tuple[str, str, str]] | None = None,
+    finish: str = "stop",
+    out_tokens: int = 7,
+):
     tool_calls = [
         SimpleNamespace(id=i, function=SimpleNamespace(name=n, arguments=a))
         for i, n, a in (calls or [])
     ]
     msg = SimpleNamespace(content=content or None, tool_calls=tool_calls or None)
     return SimpleNamespace(
-        choices=[SimpleNamespace(message=msg)],
-        usage=SimpleNamespace(prompt_tokens=11, completion_tokens=7),
+        choices=[SimpleNamespace(message=msg, finish_reason=finish)],
+        usage=SimpleNamespace(prompt_tokens=11, completion_tokens=out_tokens),
     )
 
 
@@ -123,6 +128,46 @@ def test_client_raises_after_max_retries(monkeypatch):
 
     with pytest.raises(RuntimeError, match="LLM 调用失败"):
         llm.chat([{"role": "user", "content": "hi"}], [])
+
+
+# ---------------------------------------------------------------- 输出上限
+def test_client_passes_max_tokens():
+    llm = OpenAICompatibleLLM("m", max_output_tokens=1234, client=_FakeClient([_reply("ok")]))
+    llm.chat([{"role": "user", "content": "hi"}], [])
+    assert llm._client.chat.completions.calls[0]["max_tokens"] == 1234
+
+
+def test_zero_max_tokens_omits_param():
+    """0 表示不限制：请求里不能出现 max_tokens，否则等于把 provider 默认改成 0。"""
+    llm = OpenAICompatibleLLM("m", max_output_tokens=0, client=_FakeClient([_reply("ok")]))
+    llm.chat([{"role": "user", "content": "hi"}], [])
+    assert "max_tokens" not in llm._client.chat.completions.calls[0]
+
+
+def test_truncated_output_raises_without_retry():
+    """截断不重试：同样的 prompt + 同样的上限，重试只是再花一次钱。"""
+    llm = OpenAICompatibleLLM("m", max_retries=3, max_output_tokens=100, client=_FakeClient([
+        _reply("写到一半", finish="length"),
+        _reply("第二次也不该被调用"),
+    ]))
+
+    with pytest.raises(LLMTruncated, match="截断"):
+        llm.chat([{"role": "user", "content": "hi"}], [])
+    assert len(llm._client.chat.completions.calls) == 1
+
+
+def test_finish_reason_recorded():
+    llm = OpenAICompatibleLLM("m", client=_FakeClient([_reply("ok")]))
+    assert llm.chat([{"role": "user", "content": "hi"}], []).finish_reason == "stop"
+
+
+def test_max_observed_out_tracks_peak():
+    llm = OpenAICompatibleLLM("m", client=_FakeClient([
+        _reply(out_tokens=10), _reply(out_tokens=42), _reply(out_tokens=7),
+    ]))
+    for _ in range(3):
+        llm.chat([{"role": "user", "content": "hi"}], [])
+    assert llm.max_observed_out == 42
 
 
 def test_request_payload_is_clean():

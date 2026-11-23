@@ -605,16 +605,26 @@ def run_build(
             )
 
         # ---------- 卡住检测 ----------
-        codes = _codes(tools.issues, tools.violations)
-        if codes:
-            history.append(codes)
-            if len(history) >= 3 and history[-1] == history[-2] == history[-3]:
-                stuck_events += 1
+        # 只在这一步真的产生了校验结果时才判断（validate 或 finish 都会重新校验）。
+        #
+        # 为什么不能每个 step 都判断：tools.issues 会一直保留到下一次 validate_yaml。
+        # 模型"校验失败 -> 读两个示例 -> 重写一版"是正常推进，但旧 issues 还在，
+        # 旧实现会把这几步当成"连续三次同样的错误"，白注入一次 STUCK_PROMPT。
+        # 实测 12 条用例报了 12 次 stuck，其中 dim-date 只有 2 轮却报了 2 次。
+        if any(c.name in ("validate_yaml", "finish") for c in calls):
+            codes = _codes(tools.issues, tools.violations)
+            if codes:
+                history.append(codes)
+                if len(history) >= 3 and history[-1] == history[-2] == history[-3]:
+                    stuck_events += 1
+                    history.clear()
+                    tracer.record("safety", "stuck_detected", output=list(codes))
+                    messages.append(
+                        {"role": "user", "content": STUCK_PROMPT.format(n=3, codes=list(codes))}
+                    )
+            else:
+                # 这一轮校验通过了，之前累积的失败历史不再代表"卡住"
                 history.clear()
-                tracer.record("safety", "stuck_detected", output=list(codes))
-                messages.append(
-                    {"role": "user", "content": STUCK_PROMPT.format(n=3, codes=list(codes))}
-                )
 
         if tools.finished:
             tracer.record("final", "verified_pass", output=tools.finish_summary)

@@ -132,6 +132,11 @@ def run(cases: int = 20, model: str = "deepseek-chat") -> dict:
             spec = read_design(xlsx)
             req = requirement_from_design(spec)
 
+            # 单次输出的峰值：用来决定 PDC_MAX_OUTPUT_TOKENS，
+            # 而不是靠猜一个"看起来安全"的数字。每条用例前清零。
+            if hasattr(llm, "max_observed_out"):
+                llm.max_observed_out = 0
+
             result = run_build(
                 llm,
                 req,
@@ -158,6 +163,7 @@ def run(cases: int = 20, model: str = "deepseek-chat") -> dict:
                 "seconds": round(time.time() - t0, 1),
                 "issues": [i["code"] for i in result.issues],
                 "violations": [v["code"] for v in result.violations],
+                "max_out_tokens": getattr(llm, "max_observed_out", 0),
             }
             rows.append(row)
             mark = "PASS" if row["passed"] else "FAIL"
@@ -178,6 +184,7 @@ def run(cases: int = 20, model: str = "deepseek-chat") -> dict:
         "exact_match_rate": round(sum(r["exact_match"] for r in rows) / n, 4),
         "document_loss": sum(r["document_loss"] for r in rows),
         "stuck_events": sum(r["stuck_events"] for r in rows),
+        "max_out_tokens": max((r["max_out_tokens"] for r in rows), default=0),
     }
     report = {"summary": summary, "cases": rows}
     (OUT / "report.json").write_text(

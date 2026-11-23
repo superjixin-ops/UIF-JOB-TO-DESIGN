@@ -335,6 +335,27 @@ def test_stuck_detection_fires_on_repeated_error_set(tmp_path: Path) -> None:
     assert not result.passed
 
 
+def test_stuck_detection_ignores_non_validation_steps(tmp_path: Path) -> None:
+    """校验失败后去读示例，不算卡住。
+
+    tools.issues 会一直保留到下一次 validate_yaml。如果每个 step 都判断，
+    正常的"失败 -> 读示例 -> 重写"会被误判成连续三次同错，
+    白注入一次 STUCK_PROMPT，也多花一次上下文。
+    """
+    broken = BASE.replace("        size: S", "        size: HUGE")
+    script = [
+        LLMReply(tool_calls=[call("write_yaml", text=broken), call("validate_yaml")]),
+        LLMReply(tool_calls=[call("read_example", keyword="eid")]),
+        LLMReply(tool_calls=[call("read_example", keyword="eid")]),
+        LLMReply(tool_calls=[call("read_example", keyword="eid")]),
+    ]
+    llm = ScriptedLLM(script)
+    req = requirement_from_text("dim-tiny TINY_SRC cos DIM_TINY ID", "dim-tiny")
+    result = run_build(llm, req, out_dir=tmp_path, examples_dir=tmp_path, max_rounds=4)
+
+    assert result.stuck_events == 0
+
+
 def test_yaml_in_content_is_recovered(tmp_path: Path) -> None:
     """模型把 YAML 贴在正文里而不调工具时，兜底收下并记录。"""
     llm = ScriptedLLM(

@@ -1,5 +1,5 @@
 apiVersion: crd.example.io/v1
-kind: FactPipeline
+kind: DimensionPipeline
 metadata:
   name: dim-product-family
 spec:
