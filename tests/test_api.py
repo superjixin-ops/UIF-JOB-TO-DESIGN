@@ -254,3 +254,27 @@ def test_designs_endpoint_lists_xlsx(tmp_path, monkeypatch):
     assert r.status_code == 200
     names = [d["name"] for d in r.json()["designs"]]
     assert "fact-order-fulfillment-design.xlsx" in names
+
+
+# ---------------------------------------------------------------- 内存上限
+def test_live_buffer_is_bounded(monkeypatch):
+    """_LIVE 不能无限增长：只保留最近 N 次运行。
+
+    之前它只增不删，跑得越久内存越大（每次运行约 6~15 KB，
+    1000 次就是 10 MB 级）。
+    """
+    monkeypatch.setattr(api, "_LIVE", {})
+    for i in range(api._MAX_LIVE_RUNS + 5):
+        api._live_start(f"r{i}")
+
+    assert len(api._LIVE) == api._MAX_LIVE_RUNS
+    assert "r0" not in api._LIVE                       # 最老的被丢掉
+    assert f"r{api._MAX_LIVE_RUNS + 4}" in api._LIVE   # 最新的还在
+
+
+def test_live_append_keeps_steps(monkeypatch):
+    monkeypatch.setattr(api, "_LIVE", {})
+    api._live_start("x")
+    api._live_append("x", {"index": 1})
+    api._live_append("x", {"index": 2})
+    assert [s["index"] for s in api._LIVE["x"]] == [1, 2]

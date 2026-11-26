@@ -71,7 +71,7 @@ def _make_on_step(run_id: str):
     """把 tracer 的每一步塞进内存，供 SSE 推送。"""
 
     def on_step(step) -> None:
-        _LIVE.setdefault(run_id, []).append({
+        _live_append(run_id, {
             "index": step.index,
             "kind": step.kind,
             "name": step.name,
@@ -148,6 +148,32 @@ async def _rate_limit(request: Request) -> None:
             headers={"Retry-After": str(int(wait) + 1)},
         )
 _LIVE: dict[str, list[dict]] = {}   # run_id -> 实时步骤（仅内存，用于 SSE）
+
+# 最多保留多少次运行的过程。_LIVE 只增不删，跑得越久内存越大：
+# 一次运行 20~50 步、约 6~15 KB，1000 次就是 10 MB 级。
+# 保留最近 100 次足够回放，更早的没人会再连。
+_MAX_LIVE_RUNS = 100
+
+
+def _live_start(run_id: str) -> None:
+    """登记一次运行，并丢弃最老的记录。"""
+    _LIVE[run_id] = []
+    while len(_LIVE) > _MAX_LIVE_RUNS:
+        _LIVE.pop(next(iter(_LIVE)))
+
+
+def _live_append(run_id: str, step: dict) -> None:
+    """写入一步，并保证总数不超上限。
+
+    不删自己：如果这个 run 恰好是最老的一条，保留它，
+    否则它的回放会从中间开始。
+    """
+    _LIVE.setdefault(run_id, []).append(step)
+    while len(_LIVE) > _MAX_LIVE_RUNS:
+        oldest = next(iter(_LIVE))
+        if oldest == run_id:
+            break
+        _LIVE.pop(oldest)
 
 UI_DIR = Path(__file__).parent / "ui"
 
@@ -228,7 +254,7 @@ async def create_run(
     except Exception:
         _release()
         raise
-    _LIVE[run_id] = []
+    _live_start(run_id)
 
     METRICS.inc("pdc_runs_total", {"status": "accepted", "kind": "design"})
     METRICS.set("pdc_queue_depth", _active)
@@ -395,7 +421,7 @@ async def create_build(
     except Exception:
         _release()
         raise
-    _LIVE[run_id] = []
+    _live_start(run_id)
 
     METRICS.inc("pdc_runs_total", {"status": "accepted", "kind": "build"})
     METRICS.set("pdc_queue_depth", _active)
