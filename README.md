@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/superjixin-ops/UIF-JOB-TO-DESIGN/actions/workflows/ci.yml/badge.svg)](https://github.com/superjixin-ops/UIF-JOB-TO-DESIGN/actions/workflows/ci.yml)
 
-> 读流水线配置，生成能过评审的设计文档——**但模型一行数据都不碰。**
+> 读流水线配置生成设计文档，也把设计文档写回流水线——**正向不用模型，反向模型写、校验器判。**
 
 | | |
 |---|---|

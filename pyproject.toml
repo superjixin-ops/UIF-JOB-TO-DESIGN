@@ -1,7 +1,7 @@
 [project]
 name = "pipeline-copilot"
 version = "0.1.0"
-description = "把 UIF pipeline YAML 变成列级血缘设计文档的 Agent"
+description = "UIF pipeline 与设计文档双向转换：正向确定性生成，反向模型生成 + 校验器判定"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
