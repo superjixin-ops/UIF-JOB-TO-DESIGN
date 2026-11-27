@@ -24,6 +24,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from pdc.catalog import preferred
 from pdc.design_reader import DesignSpec, SpecColumn
 from pdc.profiles import API_VERSION, MARKETING_INTENT
 
@@ -186,8 +187,20 @@ def _extract(
     }
 
 
+def _add_dedup(p: _Plan, obj: str, columns: list[str], dedup_type: str) -> None:
+    """按语料主流写法去重。
+
+    SelectDistinct 和 DropDupes 语义等价（都是保留唯一行），
+    选哪个是风格问题，交给字典的支持度决定。
+    """
+    if dedup_type == "DropDupes":
+        p.add("DropDupes", obj, subsetColumnsList=columns)
+    else:
+        p.add("SelectDistinct", obj, columns=columns)
+
+
 # ---------------------------------------------------------------- 阶段一：维表准备
-def _prep_dimensions(p: _Plan, spec: DesignSpec) -> None:
+def _prep_dimensions(p: _Plan, spec: DesignSpec, dedup_type: str) -> None:
     """维表不能直接 join。
 
     每一张都要先过滤（只留有效版本）、去重、改名——
@@ -203,15 +216,11 @@ def _prep_dimensions(p: _Plan, spec: DesignSpec) -> None:
     if _has(spec, "COUNTRY_CODE_REF.CSV"):
         p.add("Trim", cc, columns=["CTRY_NAME", "CTRY"])
         p.add("AddColumns", cc, columns=["CTRY_NAME"], value=_expr("upper(CTRY_NAME)"))
-        p.add("SelectDistinct", cc, columns=["CTRY_NAME", "CTRY"])
+        _add_dedup(p, cc, ["CTRY_NAME", "CTRY"], dedup_type)
 
     if _has(spec, "GEOGRAPHY_V3_DIMENSION"):
         p.add("FilterData", geo, whereClause="(LEVEL = 5)")
-        p.add(
-            "SelectDistinct",
-            geo,
-            columns=[d["geography_key"], d["geography_code"]],
-        )
+        _add_dedup(p, geo, [d["geography_key"], d["geography_code"]], dedup_type)
         p.add(
             "FilterData",
             geo,
@@ -789,25 +798,43 @@ def compile_spec(spec: DesignSpec) -> tuple[str, dict[str, Any]] | None:
     返回 (文本, 统计)。不认识的家族返回 None，调用方退回模型。
     统计里只放"能直接展示给人"的数字，不放中间结构——
     中间结构是计划器的实现细节，接口层不该依赖它。
+
+    生成完立刻过一遍字典：参数级错误在这里拦住，
+    而不是等到部署时才发现少了一个必填参数。
     """
     from pdc import emit
+    from pdc.catalog import check_text, fill_defaults, load_default
 
-    built = plan(spec)
+    catalog = load_default()
+    built = plan(spec, catalog)
     if built is None:
         return None
+
+    filled: list[str] = []
+    if catalog:
+        built, filled = fill_defaults(built, catalog)
+
+    text = emit.dump(built)
+    issues = check_text(text, catalog)
     jobs = built["spec"]["jobs"]
     stats = {
         "engine": "plan",
         "jobs": len(jobs),
         "extracts": sum(len(j["extract"]) for j in jobs),
         "transforms": sum(len(j["transform"]) for j in jobs),
+        "filled": filled,
+        "catalog_issues": [i.to_dict() for i in issues],
     }
-    return emit.dump(built), stats
+    return text, stats
 
 
 # ---------------------------------------------------------------- 入口
-def plan(spec: DesignSpec) -> dict[str, Any] | None:
-    """认识这个模板家族就返回完整计划，不认识返回 None（调用方退回模型）。"""
+def plan(spec: DesignSpec, catalog: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """认识这个模板家族就返回完整计划，不认识返回 None（调用方退回模型）。
+
+    catalog 非空时，语义等价的选择（去重写法）按语料主流决定，
+    而不是写死一个。
+    """
     if spec.profile != "marketing_intent":
         return None
 
@@ -819,8 +846,10 @@ def plan(spec: DesignSpec) -> dict[str, Any] | None:
     dup_keys = [str(k) for k in _fact(spec, "dup_keys", [])]
     has_dup = bool(_fact(spec, "has_hist_delta", False))
 
+    dedup_type = preferred(["SelectDistinct", "DropDupes"], catalog) or "SelectDistinct"
+
     p = _Plan()
-    _prep_dimensions(p, spec)
+    _prep_dimensions(p, spec, dedup_type)
     _prep_main(p, spec, main, dup_keys)
     _link_company(p, spec, main)
     _map_intent(p, spec, main)

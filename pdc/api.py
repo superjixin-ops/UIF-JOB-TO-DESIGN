@@ -505,9 +505,10 @@ def _execute_build(run_id: str, req: BuildRequest, design: Path) -> None:
             issues = [
                 i for i in validate_text(text) if i.severity == "error"
             ]
+            catalog_issues = stats.get("catalog_issues") or []
             target = OUT / f"{spec.pipeline}.yaml"
             target.write_text(text, encoding="utf-8")
-            status = "succeeded" if not issues else "failed"
+            status = "succeeded" if not issues and not catalog_issues else "failed"
             STORE.update(
                 run_id,
                 status=status,
@@ -515,7 +516,10 @@ def _execute_build(run_id: str, req: BuildRequest, design: Path) -> None:
                 tokens_in=0,
                 tokens_out=0,
                 files={"yaml": str(target)},
-                issues=[f"{i.code}: {i.message}" for i in issues][:20],
+                issues=(
+                    [f"{i.code}: {i.message}" for i in issues]
+                    + [f"{c['code']}: {c['message']}" for c in catalog_issues]
+                )[:20],
                 output=(
                     f"engine=plan jobs={stats['jobs']} "
                     f"extracts={stats['extracts']} transforms={stats['transforms']}"

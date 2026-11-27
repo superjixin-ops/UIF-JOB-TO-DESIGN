@@ -26,7 +26,9 @@
 
 from __future__ import annotations
 
+import copy
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -398,6 +400,7 @@ def _card(
         params[pname] = {
             "doc_required": bool(d and d["required"]),
             "schema_required": pname in schema_required,
+            "source_present": pname in source_params,
             "source_required": bool(s.get("required")),
             "rate": round(rate, 4),
             "count": hit,
@@ -597,3 +600,134 @@ def write(catalog: dict[str, Any], path: str | Path) -> Path:
 
 def load(path: str | Path) -> dict[str, Any]:
     return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+# ---------------------------------------------------------------- 生成期接入
+DEFAULT_PATH = "out/catalog.json"
+_DEFAULT_CACHE: dict[str, Any] | None = None
+
+
+def load_default() -> dict[str, Any] | None:
+    """读默认字典：PDC_CATALOG 或 out/catalog.json。没有就返回 None。
+
+    没有字典不是错误——公开仓库里不会带内部语料。
+    调用方拿到 None 就跳过参数级校验，只跑结构校验。
+    """
+    global _DEFAULT_CACHE
+    if _DEFAULT_CACHE is not None:
+        return _DEFAULT_CACHE
+    path = Path(os.getenv("PDC_CATALOG") or DEFAULT_PATH)
+    if not path.exists():
+        return None
+    _DEFAULT_CACHE = load(path)
+    return _DEFAULT_CACHE
+
+
+def check_text(text: str, catalog: dict[str, Any] | None) -> list[Issue]:
+    """校验一段 YAML 文本。结构不合法时不重复报——那是别的裁判的活。"""
+    if not catalog:
+        return []
+    from pdc.parser import PipelineParseError, parse_text
+
+    try:
+        facts = parse_text(text)
+    except PipelineParseError:
+        return []
+    return check(facts, catalog)
+
+
+MISSING = object()
+
+
+def _literal(raw: Any) -> Any:
+    """把文档里的默认值描述变成能写进 YAML 的字面量。
+
+    只认布尔、数字、引号字符串和裸标识符。
+    "the environment of job run" 这种散文一律跳过——不能猜。
+    """
+    if raw is None:
+        return MISSING
+    text = str(raw).strip()
+    if not text or text.lower() in {"none", "null"}:
+        return MISSING
+    low = text.lower()
+    if low in {"true", "false"}:
+        return low == "true"
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        return text[1:-1]
+    if re.fullmatch(r"-?\d+", text):
+        return int(text)
+    if re.fullmatch(r"-?\d+\.\d+", text):
+        return float(text)
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", text):
+        return text
+    return MISSING
+
+
+def fill_defaults(
+    pipeline: dict[str, Any],
+    catalog: dict[str, Any] | None,
+) -> tuple[dict[str, Any], list[str]]:
+    """把"文档说可选、语料总写"的参数补成显式值。
+
+    为什么值得补：
+        `Sort.ascendingOrder` 不写就是降序。语料里 47% 的人显式写，
+        看起来"可省"，省了就是另一个结果。显式写出来，
+        评审时能看见，模型也不会靠记忆去猜默认值。
+
+    只补 conventional（大家总写）和布尔默认值（写不写语义相同）。
+    required 必须由文档给，undocumented 不能猜，conflict/deprecated 不写。
+    """
+    if not catalog:
+        return pipeline, []
+
+    out = copy.deepcopy(pipeline)
+    filled: list[str] = []
+    for job in (out.get("spec") or {}).get("jobs") or []:
+        for t in job.get("transform") or []:
+            if not isinstance(t, dict):
+                continue
+            card = (catalog.get("transforms") or {}).get(str(t.get("transformType")))
+            if not card:
+                continue
+            # 这个类型有没有源码？没有源码的类型（Sort / CreateCheckpoint 在
+            # prelude 包里）只能信文档；有源码的类型，文档多出来的参数不写。
+            type_has_source = any(
+                p.get("source_present") for p in card.get("params", {}).values()
+            )
+            for name, meta in card.get("params", {}).items():
+                if name in t:
+                    continue
+                if type_has_source and not meta.get("source_present"):
+                    continue
+                value = _literal(meta.get("default"))
+                if value is MISSING:
+                    continue
+                # 语料里没人写的参数不补：写了也只是噪声。
+                # 5% 是"有人这么写"的下限，不是"主流"。
+                if float(meta.get("rate") or 0) < 0.05:
+                    continue
+                trusted = meta.get("trust") == CONVENTIONAL
+                explicit_flag = isinstance(value, bool) and meta.get("trust") in {
+                    CONVENTIONAL,
+                    OPTIONAL,
+                }
+                if not (trusted or explicit_flag):
+                    continue
+                t[name] = value
+                filled.append(f"{t.get('transformType')}.{name}={value!r}")
+    return out, filled
+
+
+def preferred(candidates: list[str] | tuple[str, ...], catalog: dict[str, Any] | None) -> str | None:
+    """同一操作的几种实现，按语料出现次数选主流。
+
+    只在**语义等价**的候选之间用。`Join` 和 `JoinByExpression` 不能这么选，
+    它们的条件形式不同，选错是语义错误，不是风格问题。
+    """
+    cards = (catalog or {}).get("transforms") or {}
+    ranked = sorted(
+        ((int(cards.get(c, {}).get("count", 0)), c) for c in candidates),
+        reverse=True,
+    )
+    return ranked[0][1] if ranked and ranked[0][0] > 0 else None

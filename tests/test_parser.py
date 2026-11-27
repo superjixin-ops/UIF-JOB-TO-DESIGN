@@ -132,3 +132,25 @@ def test_scalar_partition_by_is_one_name(tmp_path):
     facts = parse_pipeline(f)
     assert facts.jobs[0].load.partition_by == ("PARTKEY",)
     assert facts.jobs[0].extracts[0].natural_key == ("SRC_KEY",)
+
+
+def test_parse_text_matches_parse_pipeline(tmp_path):
+    """生成器要在内存里校验，不落盘。两条路必须给同一个结果。"""
+    from pdc.parser import parse_text
+
+    f = tmp_path / "p.yaml"
+    f.write_text(
+        "apiVersion: crd.ibm.k8s.io/v1\n"
+        "kind: FactPipeline\n"
+        "metadata: {name: same}\n"
+        "spec:\n"
+        "  jobs:\n"
+        "    - jobType: eid\n"
+        "      setups: {size: T}\n"
+        "      extract: []\n",
+        encoding="utf-8",
+    )
+    from_file = parse_pipeline(f)
+    from_text = parse_text(f.read_text(encoding="utf-8"), name="p.yaml")
+    assert from_text.name == from_file.name
+    assert [j.job_type for j in from_text.jobs] == [j.job_type for j in from_file.jobs]

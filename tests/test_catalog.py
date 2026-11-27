@@ -18,8 +18,10 @@ from pdc.catalog import (
     UNDOCUMENTED,
     build,
     check,
+    fill_defaults,
     parse_doc_html,
     parse_source,
+    preferred,
     scan_corpus,
     scan_sources,
     trust_of,
@@ -502,3 +504,101 @@ class TestJoinCheck:
         )
         codes = [i.code for i in check(parse_pipeline(path), self._catalog())]
         assert "C_JOIN_DIALECT_INCOMPLETE" in codes
+
+
+class TestFillDefaults:
+    def _plan(self, ttype: str = "Union") -> dict:
+        return {
+            "spec": {
+                "jobs": [
+                    {
+                        "jobType": "eid",
+                        "transform": [{"transformType": ttype, "objectNames": ["A"]}],
+                    }
+                ]
+            }
+        }
+
+    def _catalog(self, params: dict) -> dict:
+        return {"transforms": {"Union": {"params": params}}}
+
+    def test_fills_source_confirmed_default(self) -> None:
+        catalog = self._catalog({
+            "distinct": {
+                "trust": OPTIONAL, "rate": 0.31, "default": "False",
+                "source_present": True, "source_required": False,
+            }
+        })
+        out, filled = fill_defaults(self._plan(), catalog)
+        assert out["spec"]["jobs"][0]["transform"][0]["distinct"] is False
+        assert filled == ["Union.distinct=False"]
+
+    def test_skips_params_nobody_writes(self) -> None:
+        catalog = self._catalog({
+            "useContains": {
+                "trust": OPTIONAL, "rate": 0.0, "default": "False",
+                "source_present": True, "source_required": False,
+            }
+        })
+        out, filled = fill_defaults(self._plan(), catalog)
+        assert "useContains" not in out["spec"]["jobs"][0]["transform"][0]
+        assert filled == []
+
+    def test_skips_docs_only_param_when_source_exists(self) -> None:
+        # UniqueID.sequential：文档有、源码没有，写进去就是非法 kwarg。
+        catalog = self._catalog({
+            "mode": {
+                "trust": CONVENTIONAL, "rate": 0.98, "default": "overwrite",
+                "source_present": True, "source_required": False,
+            },
+            "sequential": {
+                "trust": OPTIONAL, "rate": 0.5, "default": "False",
+                "source_present": False, "source_required": False,
+            },
+        })
+        out, _ = fill_defaults(self._plan(), catalog)
+        t = out["spec"]["jobs"][0]["transform"][0]
+        assert t["mode"] == "overwrite"
+        assert "sequential" not in t
+
+    def test_uses_docs_when_type_has_no_source(self) -> None:
+        # Sort 在 prelude 包里，没有源码，只能信文档。
+        catalog = {
+            "transforms": {
+                "Union": {
+                    "params": {
+                        "ascendingOrder": {
+                            "trust": OPTIONAL, "rate": 0.47, "default": "False",
+                            "source_present": False, "source_required": False,
+                        }
+                    }
+                }
+            }
+        }
+        out, filled = fill_defaults(self._plan(), catalog)
+        assert out["spec"]["jobs"][0]["transform"][0]["ascendingOrder"] is False
+        assert filled == ["Union.ascendingOrder=False"]
+
+    def test_does_not_mutate_input(self) -> None:
+        catalog = self._catalog({
+            "distinct": {
+                "trust": OPTIONAL, "rate": 0.31, "default": "False",
+                "source_present": True, "source_required": False,
+            }
+        })
+        plan = self._plan()
+        fill_defaults(plan, catalog)
+        assert "distinct" not in plan["spec"]["jobs"][0]["transform"][0]
+
+
+class TestPreferred:
+    def test_picks_the_more_common(self) -> None:
+        catalog = {"transforms": {"SelectDistinct": {"count": 3101}, "DropDupes": {"count": 1586}}}
+        assert preferred(["DropDupes", "SelectDistinct"], catalog) == "SelectDistinct"
+
+    def test_unknown_types_are_ignored(self) -> None:
+        catalog = {"transforms": {"SelectDistinct": {"count": 10}}}
+        assert preferred(["DropDupes", "SelectDistinct"], catalog) == "SelectDistinct"
+
+    def test_no_catalog_returns_none(self) -> None:
+        assert preferred(["SelectDistinct", "DropDupes"], None) is None

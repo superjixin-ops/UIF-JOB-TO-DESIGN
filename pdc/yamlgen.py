@@ -268,6 +268,16 @@ class BuildTools:
                 facts = parse_pipeline(tmp)
                 self.parsed = True
                 self.violations = self.req.ground(facts)
+
+                # 参数级裁判：结构合法、事实对得上，不代表参数写对了。
+                # 字典存在时才跑；公开仓库没有内部语料，跳过。
+                from pdc.catalog import check as catalog_check
+                from pdc.catalog import load_default
+
+                catalog = load_default()
+                if catalog:
+                    for ci in catalog_check(facts, catalog):
+                        self.issues.append(Issue(ci.code, ci.message, ci.fix))
             except PipelineParseError as exc:
                 self.issues.append(
                     Issue(

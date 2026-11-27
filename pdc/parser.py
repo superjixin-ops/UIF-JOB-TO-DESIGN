@@ -167,26 +167,24 @@ def _load(raw: dict | None) -> LoadSpec | None:
     )
 
 
-def parse_pipeline(path: str | Path) -> PipelineFacts:
-    path = Path(path)
+def parse_text(text: str, name: str = "pipeline.yaml", source_path: str = "") -> PipelineFacts:
+    """从字符串解析。生成器要在内存里校验产物，不落盘。"""
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        data = yaml.safe_load(text)
     except yaml.YAMLError as exc:
-        raise PipelineParseError(f"{path.name} 不是合法 YAML") from exc
-    except OSError as exc:
-        raise PipelineParseError(f"读不到文件 {path}") from exc
+        raise PipelineParseError(f"{name} 不是合法 YAML") from exc
 
     if not isinstance(data, dict):
-        raise PipelineParseError(f"{path.name} 顶层不是 mapping")
+        raise PipelineParseError(f"{name} 顶层不是 mapping")
     kind = data.get("kind")
     if kind not in KNOWN_KINDS:
-        raise PipelineParseError(f"{path.name} 的 kind 是 {kind!r}，不是 pipeline")
+        raise PipelineParseError(f"{name} 的 kind 是 {kind!r}，不是 pipeline")
 
     spec = data.get("spec") or {}
     if not isinstance(spec, dict):
-        raise PipelineParseError(f"{path.name} 的 spec 不是 mapping")
+        raise PipelineParseError(f"{name} 的 spec 不是 mapping")
     if not isinstance(spec.get("jobs"), list):
-        raise PipelineParseError(f"{path.name} 的 spec.jobs 不是列表")
+        raise PipelineParseError(f"{name} 的 spec.jobs 不是列表")
 
     jobs: list[JobSpec] = []
     for idx, raw_job in enumerate(spec["jobs"], 1):
@@ -215,9 +213,18 @@ def parse_pipeline(path: str | Path) -> PipelineFacts:
             ) from exc
 
     return PipelineFacts(
-        name=str((data.get("metadata") or {}).get("name", path.stem)),
+        name=str((data.get("metadata") or {}).get("name", Path(name).stem)),
         kind=str(kind),
         owner=str((spec.get("owner") or {}).get("name", "")),
         jobs=tuple(jobs),
-        source_path=str(path),
+        source_path=source_path or name,
     )
+
+
+def parse_pipeline(path: str | Path) -> PipelineFacts:
+    path = Path(path)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise PipelineParseError(f"读不到文件 {path}") from exc
+    return parse_text(text, name=path.name, source_path=str(path))

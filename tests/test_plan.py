@@ -261,6 +261,32 @@ class TestEmit:
         assert plan(DesignSpec(**{**spec.__dict__, "profile": ""})) is None
 
 
+class TestCatalogChoice:
+    def test_dedup_follows_catalog(self) -> None:
+        """去重写法不是写死的：字典说 DropDupes 更常见就用它。"""
+        catalog = {
+            "transforms": {
+                "SelectDistinct": {"count": 10},
+                "DropDupes": {"count": 100},
+            }
+        }
+        built = plan(marketing_spec(), catalog)
+        assert built is not None
+        types = [t["transformType"] for t in built["spec"]["jobs"][0]["transform"]]
+        assert "DropDupes" in types
+        assert "SelectDistinct" not in types
+        # 参数形状跟着变，不是只换名字
+        first = next(t for t in built["spec"]["jobs"][0]["transform"] if t["transformType"] == "DropDupes")
+        assert "subsetColumnsList" in first
+        assert "columns" not in first
+
+    def test_without_catalog_uses_default(self) -> None:
+        built = plan(marketing_spec())
+        types = [t["transformType"] for t in built["spec"]["jobs"][0]["transform"]]
+        assert "SelectDistinct" in types
+        assert "DropDupes" not in types
+
+
 class TestOptionalSources:
     """维表可能缺席。规则要跟着缺，而不是引用一个不存在的列。"""
 
@@ -298,12 +324,12 @@ class TestOptionalSources:
 class TestCompile:
     def test_compile_returns_text_and_stats(self) -> None:
         text, stats = compile_spec(marketing_spec())
-        assert stats == {
-            "engine": "plan",
-            "jobs": 2,
-            "extracts": 9,
-            "transforms": 71,
-        }
+        assert stats["engine"] == "plan"
+        assert stats["jobs"] == 2
+        assert stats["extracts"] == 9
+        assert stats["transforms"] == 71
+        assert "filled" in stats
+        assert "catalog_issues" in stats
         assert "apiVersion: crd.ibm.k8s.io/v1" in text
 
     def test_compile_returns_none_for_unknown_family(self) -> None:

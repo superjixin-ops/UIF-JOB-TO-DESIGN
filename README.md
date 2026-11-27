@@ -8,7 +8,7 @@
 |---|---|
 | 仓库 | [superjixin-ops/UIF-JOB-TO-DESIGN](https://github.com/superjixin-ops/UIF-JOB-TO-DESIGN) |
 | 在线演示 | `https://3eea34987613e6.app.lhr.life`（临时隧道，token `demo-token`） |
-| 规模 | **372 测试通过 / 1 跳过** · 53 模块 · 13,537 行主代码 + 4,895 行测试 · mypy 0 错误 · 覆盖率 79% |
+| 规模 | **388 测试通过 / 1 跳过** · 53 模块 · 13,807 行主代码 + 5,120 行测试 · mypy 0 错误 · 覆盖率 79% |
 | 效果 | 设计文档 **4 小时 → 13 秒**；反向生成 **留一法 12/12 通过**，平均 1.92 轮、单条约 5.6 万 token；**模板家族 71 个变换 0 token**；设计文档零丢字段；143 个键值与源文件零差异 |
 | 技术栈 | Python 3.12 · FastAPI · asyncio · SQLite · LangGraph · LangChain · MCP · pgvector |
 | 只看结论 | [一页纸](docs/one-pager.md)——3 个数字、3 句话、5 个边界，无代码 |
@@ -86,7 +86,17 @@ uv run pdc catalog show Sort
 
 # 4) 拿字典检查一条 pipeline
 uv run pdc catalog check out/fact-market-intent-bombora.yaml
+
+# 5) 补"大家总写"的默认值（只报告，不写回，避免 YAML 往返丢注释）
+uv run pdc catalog fill out/fact-market-intent-bombora.yaml
+
+# 6) 同一操作的几种实现，按语料支持度选主流
+uv run pdc catalog prefer SelectDistinct,DropDupes
 ```
+
+**生成时自动过字典**：`compile_spec` 出完 YAML 文本先跑 `catalog check`，
+参数级不过就不出产物。模型路径同样接入——`validate_yaml` 会把
+`C_MISSING_PARAM` / `C_UNKNOWN_PARAM` 一起退回给模型。
 
 每个参数都有一个 `trust`，回答"该信谁"：
 
@@ -249,7 +259,7 @@ pdc/
 ops/       告警规则 + 检查脚本
 eval/      四指标评测 + 审计 golden set + 反向生成留一法 + 逐键保真审计
 rag/       检索评测（样例语料可复现）、α 扫描、A/B、引用分析
-tests/     373 个用例（372 通过 / 1 跳过）
+tests/     389 个用例（388 通过 / 1 跳过）
 loadtest/  并发压测
 samples/   虚构样例数据（可公开）
 scripts/   本地启动 + 隧道 + 语料结构统计

@@ -402,6 +402,19 @@ def cmd_build(args: argparse.Namespace) -> int:
 
         target = out_dir / f"{req.pipeline}.yaml"
         target.write_text(text, encoding="utf-8")
+
+        # 参数级校验：结构合法不等于参数合法。
+        # 这里拦的是"少了必填参数"这种运行时才会炸的错。
+        catalog_issues = plan_stats.get("catalog_issues") or []
+        if catalog_issues:
+            print(json.dumps({
+                "status": "failed",
+                **plan_stats,
+                "catalog_violations": catalog_issues,
+            }, ensure_ascii=False, indent=2))
+            print(f"\n❌ 产物未通过字典校验（编译器 bug），保留在 {target}", file=sys.stderr)
+            return 1
+
         facts = parse_pipeline(target)
         violations = req.ground(facts)
         blocking = [v for v in violations if v.severity == "error"]
@@ -632,6 +645,44 @@ def cmd_catalog(args: argparse.Namespace) -> int:
         return 2
     built = cat.load(catalog_path)
 
+    if args.action == "fill":
+        import yaml as _yaml
+
+        data = _yaml.safe_load(Path(args.target).read_text(encoding="utf-8"))
+        filled_data, filled = cat.fill_defaults(data, built)
+        # 默认只报告，不写回：YAML 往返会丢掉全部注释，
+        # 真实流水线的注释比参数值更重要。
+        if args.out and args.out != str(Path(cat.DEFAULT_PATH)):
+            text = _yaml.safe_dump(filled_data, allow_unicode=True, sort_keys=False, width=200)
+            Path(args.out).write_text(text, encoding="utf-8")
+            print(json.dumps({
+                "filled": filled,
+                "out": args.out,
+                "warning": "YAML 往返不保留注释",
+            }, ensure_ascii=False, indent=2))
+        else:
+            print(json.dumps({"filled": filled}, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.action == "prefer":
+        names = [x.strip() for x in args.target.split(",") if x.strip()]
+        rows = []
+        for name in names:
+            card = built["transforms"].get(name) or {}
+            rows.append({
+                "type": name,
+                "count": int(card.get("count") or 0),
+                "required": sorted(
+                    k for k, v in (card.get("params") or {}).items()
+                    if v.get("trust") == "required"
+                ),
+            })
+        rows.sort(key=lambda r: -r["count"])
+        if rows:
+            rows[0]["preferred"] = True
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        return 0
+
     if args.action == "show":
         card = built["transforms"].get(args.target) or built["connectors"].get(args.target)
         if card is None:
@@ -822,7 +873,7 @@ def main(argv: list[str] | None = None) -> int:
     doc.set_defaults(func=cmd_doctor)
 
     ca = sub.add_parser("catalog", help="变换字典：语料 + 文档 + schema")
-    ca.add_argument("action", choices=["build", "docs", "show", "check"])
+    ca.add_argument("action", choices=["build", "docs", "show", "check", "fill", "prefer"])
     ca.add_argument("target", nargs="?", default="", help="show 的类型名，或 check 的 YAML 路径")
     ca.add_argument("--corpus", default="", help="真实流水线目录")
     ca.add_argument("--docs", default="", help="抓取阶段产出的 docs.json")
