@@ -343,9 +343,15 @@ def cmd_build(args: argparse.Namespace) -> int:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # 读文档时可能要用模型翻译长段落的变换说明，所以先把模型建好。
+    # 没有 key 也能读，只是长段落会被跳过（--dry-run 用得上）。
+    llm = None
+    if os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY"):
+        llm = _make_llm(args.model, getattr(args, "route", ""))
+
     if source.suffix.lower() in {".xlsx", ".xlsm"}:
         try:
-            spec = read_design(source)
+            spec = read_design(source, llm=llm)
         except SpecReadError as exc:
             print(f"读不了设计文档: {exc}", file=sys.stderr)
             return 2
@@ -365,15 +371,13 @@ def cmd_build(args: argparse.Namespace) -> int:
         print(req.prompt)
         return 0
 
-    if not (os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY")):
+    if llm is None:
         print(
             "生成 YAML 必须用真实模型：产物是模型写的，没有模型就没有产物。\n"
             "设置 OPENAI_API_KEY（或 DEEPSEEK_API_KEY）后重试；只看需求用 --dry-run。",
             file=sys.stderr,
         )
         return 2
-
-    llm = _make_llm(args.model, getattr(args, "route", ""))
     tracer = Tracer(path=out_dir / f"{req.pipeline}-build-trace.jsonl")
 
     result = run_build(

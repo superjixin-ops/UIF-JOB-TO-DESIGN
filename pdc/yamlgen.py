@@ -678,9 +678,25 @@ def _result(
 # 两种输入的装配器
 # ---------------------------------------------------------------------------
 def requirement_from_design(spec) -> Requirement:
-    """结构化文档：强契约，列级逐字比对。"""
+    """结构化文档：强契约，列级逐字比对。
+
+    外来文档（weak=True）走弱契约：变换是自然语言翻译来的，
+    模型可能合并/改写步骤，逐字比对必然失败。弱契约只查
+    "列名有没有编造"和"实体在不在原文里"。
+    """
     from pdc.spec_grounding import check as check_spec
-    from pdc.spec_grounding import expected_items
+    from pdc.spec_grounding import check_text, expected_items
+
+    if getattr(spec, "weak", False):
+        prompt = spec.to_prompt()
+        return Requirement(
+            pipeline=spec.pipeline,
+            prompt=prompt,
+            ground=lambda facts: check_text(prompt, facts),
+            item_count=expected_items(spec),
+            label="imported",
+            warnings=tuple(spec.warnings),
+        )
 
     return Requirement(
         pipeline=spec.pipeline,

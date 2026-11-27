@@ -82,6 +82,37 @@ RULES: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
 ]
 
 
+
+def merge_renames(transforms: list[SpecTransform]) -> list[SpecTransform]:
+    """把同一个 job 里所有的 RenameColumns 合成一步。
+
+    文档里一列一行，天然会生成 20 个独立改名。
+    20 步会把提示词挤满，模型就没注意力看后面的 join / SparkSql 参数了。
+    合并之后语义不变（改名互不影响），提示词短一大截。
+    """
+    from dataclasses import replace as _replace
+
+    merged: dict[str, dict] = {}
+    first_at: dict[str, int] = {}
+    out: list[SpecTransform] = []
+    for t in transforms:
+        if t.transform_type != "RenameColumns":
+            out.append(t)
+            continue
+        mapping = t.params.get("mapColumns") or {}
+        if not mapping:
+            continue
+        if t.job not in first_at:
+            first_at[t.job] = len(out)
+            out.append(t)
+            merged[t.job] = {}
+        merged[t.job].update(mapping)
+
+    for job, at in first_at.items():
+        out[at] = _replace(out[at], params={"mapColumns": merged[job]})
+    return out
+
+
 def detect(wb) -> bool:
     """按表名判断是不是这一类模板。不猜内容。"""
     names = set(wb.sheetnames)
@@ -197,7 +228,7 @@ def _to_column(name: str, dtype: str, nullable: bool) -> SpecColumn:
     )
 
 
-def read_marketing(path: str | Path) -> DesignSpec:
+def read_marketing(path: str | Path, llm=None) -> DesignSpec:
     p = Path(path)
     wb = load_workbook(p, data_only=True, read_only=True)
     try:
@@ -268,7 +299,7 @@ def read_marketing(path: str | Path) -> DesignSpec:
 
         # ---------- 变换：能映射的映射，不能的留原文 ----------
         transforms: list[SpecTransform] = []
-        unknown: list[str] = []
+        unknown: list[dict] = []
 
         def collect(rows, idx, job: str, alias: str, start: int) -> int:
             step = start
@@ -283,7 +314,7 @@ def read_marketing(path: str | Path) -> DesignSpec:
                     types = map_transform(raw)
                     if not types:
                         if not is_known(raw):
-                            unknown.append(f"{job}.{target}: {normalize(raw)[:60]}")
+                            unknown.append({"job": job, "target": str(target), "raw": normalize(raw)[:400]})
                         continue
                     for t in types:
                         step += 1
@@ -308,9 +339,38 @@ def read_marketing(path: str | Path) -> DesignSpec:
         step = collect(src_rows, src_idx, "eid", "SOURCE", 0)
         collect(dm_rows, dm_idx, "dm", "EID_SOURCE", step)
 
+        if unknown and llm is not None:
+            for job in sorted({u["job"] for u in unknown}):
+                batch = [
+                    {"target": u["target"], "raw": u["raw"]}
+                    for u in unknown
+                    if u["job"] == job
+                ]
+                translated = translate_batch(llm, batch)
+                done = set()
+                for target, item in translated.items():
+                    if item["confidence"] < 0.5:
+                        continue
+                    for st in item["steps"]:
+                        step += 1
+                        transforms.append(
+                            SpecTransform(
+                                job=job,
+                                step=step,
+                                transform_type=st["transformType"],
+                                inputs=("SOURCE",) if job == "eid" else ("EID_SOURCE",),
+                                output="SOURCE" if job == "eid" else "EID_SOURCE",
+                                detail=f"model(conf={item['confidence']:.2f})",
+                                params=st["params"],
+                            )
+                        )
+                    done.add(target)
+                unknown = [u for u in unknown if not (u["job"] == job and u["target"] in done)]
+
         if unknown:
+            names = [f"{u['job']}.{u['target']}" for u in unknown]
             warnings.append(
-                f"{len(unknown)} 条变换无法用规则映射，已跳过（需人工确认）：" + "；".join(unknown[:3])
+                f"{len(unknown)} 条变换无法翻译，已跳过（需人工确认）：" + "；".join(names[:5])
             )
 
         pipeline = re.sub(r"[^a-z0-9]+", "-", table_name.lower()).strip("-")
@@ -370,6 +430,7 @@ def read_marketing(path: str | Path) -> DesignSpec:
             loads=loads,
             source_path=str(p),
             warnings=tuple(warnings),
+            weak=True,
         )
     finally:
         wb.close()
@@ -401,7 +462,7 @@ def _pipeline_from_text(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", m.group(1).lower()).strip("-")
 
 
-def read_single(path: str | Path) -> DesignSpec:
+def read_single(path: str | Path, llm=None) -> DesignSpec:
     p = Path(path)
     wb = load_workbook(p, data_only=True, read_only=True)
     try:
@@ -440,7 +501,7 @@ def read_single(path: str | Path) -> DesignSpec:
         # 变换
         transforms: list[SpecTransform] = []
         step = 0
-        unknown: list[str] = []
+        unknown: list[dict] = []
         for row in rows[1:]:
             name = _cell(row, idx, "Target Column")
             if not name:
@@ -452,10 +513,22 @@ def read_single(path: str | Path) -> DesignSpec:
                 types = map_transform(raw)
                 if not types:
                     if not is_known(raw):
-                        unknown.append(f"{name}: {normalize(raw)[:60]}")
+                        unknown.append({"target": str(name), "raw": normalize(raw)[:400]})
                     continue
                 for t in types:
                     step += 1
+                    params: dict = {}
+                    if t == "RenameColumns":
+                        # 改名的来源列：优先用"中间结果"，没有就退到源列。
+                        # 不填 mapColumns 的话，生成的 RenameColumns 是空操作。
+                        source = ""
+                        for candidate in ("Intermediate Result 1", "Json Source Columns", "Historical Intent"):
+                            v = _cell(row, idx, candidate)
+                            if v:
+                                source = str(v).strip()
+                                break
+                        if source and source != str(name):
+                            params = {"mapColumns": {source: str(name)}}
                     transforms.append(
                         SpecTransform(
                             job="eid",
@@ -464,12 +537,37 @@ def read_single(path: str | Path) -> DesignSpec:
                             inputs=("SOURCE",),
                             output="SOURCE",
                             detail=normalize(raw)[:120],
+                            params=params,
                         )
                     )
+        if unknown and llm is not None:
+            raw_by_target = {u["target"]: u["raw"] for u in unknown}
+            translated = translate_batch(llm, unknown)
+            done = set()
+            for target, item in translated.items():
+                if item["confidence"] < 0.5:
+                    continue
+                for st in item["steps"]:
+                    step += 1
+                    transforms.append(
+                        SpecTransform(
+                            job="eid",
+                            step=step,
+                            transform_type=st["transformType"],
+                            inputs=("SOURCE",),
+                            output="SOURCE",
+                            detail=f"原文: {raw_by_target.get(target, '')[:100]}",
+                            params=st["params"],
+                        )
+                    )
+                done.add(target)
+            unknown = [u for u in unknown if u["target"] not in done]
+
         if unknown:
+            names = [u["target"] for u in unknown]
             warnings.append(
-                f"{len(unknown)} 条变换无法用规则映射，已跳过（需人工确认）："
-                + "；".join(unknown[:3])
+                f"{len(unknown)} 条变换无法翻译，已跳过（需人工确认）："
+                + "；".join(names[:5])
             )
 
         # 流水线名：输出路径可能写在表头格里，也可能写在第一行数据里。
@@ -495,7 +593,7 @@ def read_single(path: str | Path) -> DesignSpec:
                     query=f"landing/{pipeline}", main_df=True,
                 ),
             ),
-            transforms=tuple(transforms),
+            transforms=tuple(merge_renames(transforms)),
             loads=(
                 SpecLoad(
                     job="eid",
@@ -508,6 +606,100 @@ def read_single(path: str | Path) -> DesignSpec:
             ),
             source_path=str(p),
             warnings=tuple(warnings),
+            weak=True,
         )
     finally:
         wb.close()
+
+
+# ---------------------------------------------------------------- 模型翻译
+# 规则表只认短句式（"simple movement"、"rename"）。
+# 长段落是业务规则，必须交给模型翻译成**带参数**的步骤，
+# 而不是跳过——跳过的恰好是 join / hash / 去重这些真正重要的逻辑。
+
+SUPPORTED_TYPES = {
+    "RenameColumns", "Trim", "Drop", "Cast", "Select", "FilterType2",
+    "JoinByExpression", "AddColumns", "FillNA", "UniqueID", "SparkSql",
+    "CurrentDate", "AddRow",
+}
+
+TRANSLATE_SYSTEM = """你是数据管道变换翻译器。把业务规则翻译成结构化步骤。
+
+可用类型和参数：
+- RenameColumns: {"mapColumns": {"旧列": "新列"}}
+- Trim: {"columns": ["列"]}
+- Drop: {"columns": ["列"]}
+- Cast: {"columns": ["列"], "dataType": "IntegerType"}
+- Select: {"columns": ["列"]}
+- FilterType2: {"condition": "SQL 条件"}
+- JoinByExpression: {"joinExpression": "A.x = B.y", "joinType": "left", "columnsToSelect": ["A.*"]}
+- AddColumns: {"columns": [{"name": "X", "value": "SQL 表达式"}]}
+- FillNA: {"columns": ["列"], "value": "填充值"}
+- UniqueID: {"columns": ["列"]}
+- SparkSql: {"query": "完整 SELECT 语句"}
+- CurrentDate: {"columns": ["列"]}
+- AddRow: {"values": {"列": "值"}}
+
+要求：
+1. 只输出 JSON，不要解释。
+2. 格式：{"目标列名": {"confidence": 0到1, "steps": [{"transformType": "...", "params": {...}}]}}
+3. 不确定就给低 confidence，不要编造列名。
+4. 如果逻辑复杂到无法用上面的类型表达，用 SparkSql，query 写完整 SELECT。
+"""
+
+
+def _extract_json(text: str) -> dict:
+    """从模型回复里抠出第一个 JSON 对象。"""
+    import json as _json
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        return {}
+    try:
+        data = _json.loads(text[start : end + 1])
+    except _json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def translate_batch(llm, items: list[dict]) -> dict[str, dict]:
+    """一次调用翻译多条规则。返回 {目标列: {"confidence":..., "steps":[...]}}。"""
+    import json as _json
+
+    if not items:
+        return {}
+    user = _json.dumps(items, ensure_ascii=False, indent=2)
+    try:
+        reply = llm.chat(
+            [
+                {"role": "system", "content": TRANSLATE_SYSTEM},
+                {"role": "user", "content": user},
+            ],
+            [],
+        )
+    except Exception:  # noqa: BLE001 - 翻译失败不能拖垮整份文档
+        return {}
+    data = _extract_json(reply.content or "")
+    out: dict[str, dict] = {}
+    for key, value in data.items():
+        if not isinstance(value, dict):
+            continue
+        steps = value.get("steps")
+        if not isinstance(steps, list):
+            continue
+        clean = []
+        for st in steps:
+            if not isinstance(st, dict):
+                continue
+            t = str(st.get("transformType", "")).strip()
+            if t not in SUPPORTED_TYPES:
+                continue
+            params = st.get("params")
+            clean.append({"transformType": t, "params": params if isinstance(params, dict) else {}})
+        if clean:
+            out[key] = {
+                "confidence": float(value.get("confidence") or 0),
+                "steps": clean,
+            }
+    return out

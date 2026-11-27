@@ -113,6 +113,8 @@ class DesignSpec:
     loads: tuple[SpecLoad, ...] = ()
     source_path: str = ""
     warnings: tuple[str, ...] = field(default_factory=tuple)
+    # 外来文档（不是本工具产出的）：变换是自然语言，只能做弱契约。
+    weak: bool = False
 
     # ---------- 给模型看的视图 ----------
 
@@ -169,12 +171,18 @@ class DesignSpec:
                 lines.append("transform:")
                 for t in txs:
                     detail = f" detail={t.detail}" if t.detail else ""
-                    params = (
-                        " params=" + json.dumps(t.params, ensure_ascii=False) if t.params else ""
-                    )
+                    # 参数平铺，不要写成 params={...}。
+                    # 写成嵌套时模型会照着嵌套，而 YAML 的 schema 要求平铺
+                    # （joinExpression 直接写在 transform 下面），校验器会判参数丢失。
+                    flat = ""
+                    if t.params:
+                        flat = " " + " ".join(
+                            f"{k}={json.dumps(v, ensure_ascii=False)}"
+                            for k, v in t.params.items()
+                        )
                     lines.append(
                         f"  - step={t.step} type={t.transform_type} "
-                        f"inputs={list(t.inputs)} output={t.output or '-'}{detail}{params}"
+                        f"inputs={list(t.inputs)} output={t.output or '-'}{detail}{flat}"
                     )
 
             for load in [x for x in self.loads if x.job == job]:
@@ -300,7 +308,7 @@ def _cell(row: list[object], i: int | None) -> object:
     return row[i] if row[i] is not None else ""
 
 
-def read_design(path: str | Path) -> DesignSpec:
+def read_design(path: str | Path, llm=None) -> DesignSpec:
     """读一份设计文档。只认同一种表结构：本仓库 design.py 产出的那份。
 
     这不是通用 xlsx 解析器，是**契约解析器**——表头变了就报错，
@@ -325,14 +333,14 @@ def read_design(path: str | Path) -> DesignSpec:
 
         if _detect_marketing(wb):
             wb.close()
-            return read_marketing(p)
+            return read_marketing(p, llm=llm)
 
         from pdc.import_marketing import detect_single as _detect_single
         from pdc.import_marketing import read_single
 
         if _detect_single(wb):
             wb.close()
-            return read_single(p)
+            return read_single(p, llm=llm)
 
         raise SpecReadError("缺 Overview 表：这份文档不是本工具产出的，请先确认表结构")
     overview: dict[str, str] = {}
