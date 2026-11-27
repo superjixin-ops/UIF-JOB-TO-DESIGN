@@ -167,6 +167,20 @@ class TestBuild:
         built = build(_corpus(), _docs(), _schema())
         assert built["transforms"]["Sort"]["flags"] == []
 
+    def test_connector_docs_are_keyed_by_value(self) -> None:
+        """文档标题是 COSConnector，语料里是 cos。不映射就全成"文档没写"。"""
+        docs = {
+            "COSConnector": {
+                "page": "conn",
+                "params": [
+                    {"name": "connector", "required": True, "codes": ["cos"]},
+                    {"name": "query", "required": True, "codes": []},
+                ],
+            }
+        }
+        built = build(_corpus(), docs, {**_schema(), "connectors": {"cos": {"required": [], "props": ["query"]}}})
+        assert built["connectors"]["cos"]["params"]["query"]["trust"] == REQUIRED
+
 
 class TestCheck:
     def _pipeline(self, tmp_path, transform: str) -> str:

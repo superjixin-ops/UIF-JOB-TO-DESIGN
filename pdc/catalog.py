@@ -109,6 +109,23 @@ def load_docs(path: str | Path) -> dict[str, dict[str, Any]]:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
+def connector_docs(docs: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """把文档标题（COSConnector）映射成连接器值（cos）。
+
+    不映射的话，文档里的 `query*` 永远对不上语料里的 `cos`，
+    所有连接器参数都会被误判成"文档没写"。
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for title, card in docs.items():
+        params = {p["name"]: p for p in card.get("params", [])}
+        if "connector" not in params:
+            continue
+        codes = [c for c in params["connector"].get("codes", []) if c and " " not in c]
+        value = codes[0].strip() if codes else title.replace("Connector", "").lower()
+        out[value] = card
+    return out
+
+
 # ---------------------------------------------------------------- 语料
 def scan_corpus(root: str | Path, *, samples: int = 2) -> dict[str, Any]:
     """扫真实流水线，统计每个变换/连接器的参数出现率。
@@ -289,7 +306,11 @@ def build(
 ) -> dict[str, Any]:
     """合成字典。语料是主语，文档和 schema 是两票修正。"""
     t_docs = {k: v for k, v in docs.items() if k in schema["transforms"] or k in corpus["transforms"]}
-    c_docs = {k: v for k, v in docs.items() if k in schema["connectors"] or k in corpus["extracts"]}
+    c_docs = {
+        k: v
+        for k, v in connector_docs(docs).items()
+        if k in schema["connectors"] or k in corpus["extracts"]
+    }
 
     transforms = {}
     for name in sorted(set(corpus["transforms"]) | set(t_docs) | set(schema["transforms"])):
