@@ -328,6 +328,17 @@ def _link_company(p: _Plan, spec: DesignSpec, main: str) -> None:
     d = _DIM_COLUMNS
     counts = "LOCATION_COMPANY_DOMAIN_COUNTS"
 
+    has_country = _has(spec, "COUNTRY_CODE_REF.CSV")
+    has_duns = _has(spec, "DIM_DUNS")
+
+    company_cols = [
+        f"{main}.*",
+        f"{lc}.{d['company_key']}",
+        f"{lc}.{d['company_duns']}",
+    ]
+    if has_country:
+        company_cols.append(f"{lc}.COMPANY_LANDED_COUNTRY_NAME")
+
     p.add(
         "JoinByExpression",
         [main, lc],
@@ -337,15 +348,10 @@ def _link_company(p: _Plan, spec: DesignSpec, main: str) -> None:
             f"{lc}.{d['company_key']} > 0"
         ),
         joinType="left",
-        columnsToSelect=[
-            f"{main}.*",
-            f"{lc}.{d['company_key']}",
-            f"{lc}.{d['company_duns']}",
-            f"{lc}.COMPANY_LANDED_COUNTRY_NAME",
-        ],
+        columnsToSelect=company_cols,
     )
 
-    if _has(spec, "DIM_DUNS"):
+    if has_duns:
         p.add(
             "JoinByExpression",
             [main, duns],
@@ -360,31 +366,32 @@ def _link_company(p: _Plan, spec: DesignSpec, main: str) -> None:
             ],
         )
 
-    postal = _norm("HQ_Zip")
-    candidate_postal = _norm(d["duns_postal"])
-    p.add(
-        "AddColumns",
-        main,
-        columns=["POSTAL_MATCH_SCORE"],
-        value=_expr(
+    # 缺 DUNS 维表时邮编项恒为 0，但不能引用一个不存在的列——
+    # 那会让整段 SQL 在运行期才报错，而不是在生成期。
+    if has_duns:
+        postal = _norm("HQ_Zip")
+        candidate_postal = _norm(d["duns_postal"])
+        postal_value = _expr(
             f"CASE WHEN {postal} <> '' AND {postal} = {candidate_postal} "
             "THEN 1 ELSE 0 END"
-        ),
-    )
+        )
+    else:
+        postal_value = "lit(0)"
+    p.add("AddColumns", main, columns=["POSTAL_MATCH_SCORE"], value=postal_value)
+
     # 源里没有公司电话，这一项恒为 0。留字段不留逻辑，
     # 是因为后面的分数是三项相加，少一项会让权重悄悄变成 1/2。
     p.add("AddColumns", main, columns=["PHONE_MATCH_SCORE"], value="lit(0)")
 
-    country = _norm("COMPANY_COUNTRY_NAME")
-    landed = _norm("COMPANY_LANDED_COUNTRY_NAME")
-    p.add(
-        "AddColumns",
-        main,
-        columns=["COUNTRY_MATCH_SCORE"],
-        value=_expr(
+    if has_country:
+        country = _norm("COMPANY_COUNTRY_NAME")
+        landed = _norm("COMPANY_LANDED_COUNTRY_NAME")
+        country_value = _expr(
             f"CASE WHEN {country} <> '' AND {country} = {landed} THEN 1 ELSE 0 END"
-        ),
-    )
+        )
+    else:
+        country_value = "lit(0)"
+    p.add("AddColumns", main, columns=["COUNTRY_MATCH_SCORE"], value=country_value)
     p.add(
         "AddColumns",
         main,
@@ -428,20 +435,18 @@ def _link_company(p: _Plan, spec: DesignSpec, main: str) -> None:
             f"THEN coalesce({d['company_key']}, -1) ELSE -1 END"
         ),
     )
-    p.add(
-        "Drop",
-        main,
-        columns=[
-            "BOMBORA_ROW_ID",
-            "LOCATION_CANDIDATE_COUNT",
-            "LOCATION_MATCH_RANK",
-            "POSTAL_MATCH_SCORE",
-            "PHONE_MATCH_SCORE",
-            "COUNTRY_MATCH_SCORE",
-            "LOCATION_MATCH_SCORE",
-            "COMPANY_LANDED_COUNTRY_NAME",
-        ],
-    )
+    helpers = [
+        "BOMBORA_ROW_ID",
+        "LOCATION_CANDIDATE_COUNT",
+        "LOCATION_MATCH_RANK",
+        "POSTAL_MATCH_SCORE",
+        "PHONE_MATCH_SCORE",
+        "COUNTRY_MATCH_SCORE",
+        "LOCATION_MATCH_SCORE",
+    ]
+    if has_country:
+        helpers.append("COMPANY_LANDED_COUNTRY_NAME")
+    p.add("Drop", main, columns=helpers)
     p.add(
         "RenameColumns",
         main,

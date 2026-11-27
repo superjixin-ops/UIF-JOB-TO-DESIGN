@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import replace
 
 import pytest
 import yaml
@@ -21,7 +22,7 @@ from pdc import emit
 from pdc.design_reader import DesignSpec, SpecColumn, SpecExtract, SpecLoad
 from pdc.import_marketing import _parse_dup_keys, _parse_landing, _read_column_meta
 from pdc.parser import parse_pipeline
-from pdc.plan import plan
+from pdc.plan import compile_spec, plan
 from pdc.profiles import allowed_aliases
 from pdc.spec_grounding import check_text
 
@@ -258,6 +259,56 @@ class TestEmit:
     def test_unknown_profile_returns_none(self) -> None:
         spec = marketing_spec()
         assert plan(DesignSpec(**{**spec.__dict__, "profile": ""})) is None
+
+
+class TestOptionalSources:
+    """维表可能缺席。规则要跟着缺，而不是引用一个不存在的列。"""
+
+    def test_without_history_job(self) -> None:
+        spec = replace(
+            marketing_spec(),
+            jobs=("eid-sftp",),
+            extracts=tuple(e for e in marketing_spec().extracts if e.job == "eid-sftp"),
+            facts={**marketing_spec().facts, "has_hist_delta": False},
+        )
+        built = plan(spec)
+        assert built is not None
+        assert [j["jobType"] for j in built["spec"]["jobs"]] == ["eid-sftp"]
+        types = [t["transformType"] for t in built["spec"]["jobs"][0]["transform"]]
+        assert "Union" not in types
+        conn = built["spec"]["jobs"][0]["load"]["connections"][0]
+        assert conn["query"] == "fact/FACT_MARKET_INTENT_BOMBORA/transform.parquet"
+
+    def test_without_duns_still_scores(self) -> None:
+        spec = replace(
+            marketing_spec(),
+            extracts=tuple(
+                e for e in marketing_spec().extracts if e.alias != "DIM_DUNS"
+            ),
+        )
+        built = plan(spec)
+        assert built is not None
+        transforms = built["spec"]["jobs"][0]["transform"]
+        assert all("DIM_DUNS" not in t["objectNames"] for t in transforms)
+        postal = next(t for t in transforms if t.get("columns") == ["POSTAL_MATCH_SCORE"])
+        assert postal["value"] == "lit(0)"
+        assert "POSTAL_CODE" not in str(transforms)
+
+
+class TestCompile:
+    def test_compile_returns_text_and_stats(self) -> None:
+        text, stats = compile_spec(marketing_spec())
+        assert stats == {
+            "engine": "plan",
+            "jobs": 2,
+            "extracts": 9,
+            "transforms": 71,
+        }
+        assert "apiVersion: crd.ibm.k8s.io/v1" in text
+
+    def test_compile_returns_none_for_unknown_family(self) -> None:
+        spec = marketing_spec()
+        assert compile_spec(DesignSpec(**{**spec.__dict__, "profile": ""})) is None
 
 
 class TestDocumentParsing:
