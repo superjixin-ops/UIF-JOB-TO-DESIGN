@@ -319,6 +319,13 @@ def read_design(path: str | Path) -> DesignSpec:
     # ---------- Overview ----------
     ws = _find_sheet(wb, "Overview")
     if ws is None:
+        # 不是本工具产出的格式。看看是不是 Marketing 模板（两张映射表 + DDL）。
+        from pdc.import_marketing import detect as _detect_marketing
+        from pdc.import_marketing import read_marketing
+
+        if _detect_marketing(wb):
+            wb.close()
+            return read_marketing(p)
         raise SpecReadError("缺 Overview 表：这份文档不是本工具产出的，请先确认表结构")
     overview: dict[str, str] = {}
     for row in _rows(ws):

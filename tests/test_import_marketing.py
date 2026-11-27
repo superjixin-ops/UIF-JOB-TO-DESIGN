@@ -1,0 +1,131 @@
+"""Marketing 模板导入器的测试。
+
+用合成数据，不依赖任何真实文档。
+
+为什么必须有这组测试：
+
+    规则表的**顺序**曾经写错过——"simple movement" 放在
+    "lookup from" 前面，导致 "simple movement and lookup from X"
+    被误判成"不需要变换"，join 全丢了。
+    这种错误不会报错，只会让产物少一步，所以必须用测试钉住。
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from openpyxl import Workbook
+
+from pdc.design_reader import SpecReadError, read_design
+from pdc.import_marketing import detect, map_transform, parse_ddl
+
+
+# ---------------------------------------------------------------- 规则表
+def test_lookup_wins_over_simple_movement():
+    """具体的规则必须排在前面。
+
+    "simple movement and lookup from X" 同时包含两个关键词，
+    顺序错了就会把 join 丢掉。
+    """
+    assert map_transform("Simple Movement and Lookup from DIM.CODE") == ("JoinByExpression",)
+
+
+def test_simple_movement_means_no_transform():
+    assert map_transform("Simple Movement") == ()
+    assert map_transform("simple movement") == ()
+
+
+def test_rename_and_trim_before_rename():
+    assert map_transform("rename and trim") == ("RenameColumns", "Trim")
+    assert map_transform("rename") == ("RenameColumns",)
+
+
+def test_unknown_returns_empty():
+    assert map_transform("For historical data, assign the value as ...") == ()
+
+
+# ---------------------------------------------------------------- DDL
+def test_parse_ddl_ignores_trailing_statements():
+    """建表语句后面还有 ALTER / COMMENT，不能把它们当成列。"""
+    ddl = """
+    CREATE TABLE S.T (
+        A INTEGER NOT NULL,
+        B DECIMAL(18, 2),
+        C TIMESTAMP NOT NULL
+    );
+    ALTER TABLE S.T ADD PRIMARY KEY (A);
+    COMMENT ON COLUMN S.T.A IS '说明';
+    """
+    table, cols = parse_ddl(ddl)
+    assert table == "S.T"
+    assert [c[0] for c in cols] == ["A", "B", "C"]
+    assert cols[0][2] is False      # NOT NULL
+    assert cols[1][2] is True       # 可空
+
+
+# ---------------------------------------------------------------- 端到端
+def _make_workbook(path: Path, *, ddl_col: str = "B") -> None:
+    wb = Workbook()
+
+    ws = wb.active
+    ws.title = "Source to EID - Dim, Fact name"
+    ws.append([
+        "Source", "Source Columns", "Transformation 1", "Intermediate Result 1",
+        "Transformation 2", "Target Column", "Column Type", "Length", "Null", "Example", "Target",
+    ])
+    ws.append(["sys", "a", "Simple Movement", "", "", "A", "INTEGER", "", "N", "1", ""])
+    ws.append(["sys", "b", "Simple Movement and Lookup from DIM.CODE", "", "", "B", "STRING", "", "Y", "x", ""])
+
+    ws2 = wb.create_sheet("EID to DM - Dim, Fact name")
+    ws2.append([
+        "EID Source", "Source Columns", "Transformation 1", "Intermediate Result 1",
+        "Transformation 2", "Target Column", "Column Type", "Length", "Null",
+        "Example", "Business Description", "Target",
+    ])
+    ws2.append(["eid", "A", "Simple movement", "", "", "A", "INTEGER", "", "N", "1", "", ""])
+    ws2.append(["eid", "B", "Simple movement", "", "", ddl_col, "STRING", "", "Y", "x", "", ""])
+
+    ws3 = wb.create_sheet("DDL")
+    ws3["A1"] = (
+        "CREATE TABLE S.T (\n"
+        "  A INTEGER NOT NULL,\n"
+        "  B STRING\n"
+        ");\n"
+    )
+
+    wb.save(path)
+
+
+def test_detect_template(tmp_path: Path) -> None:
+    from openpyxl import load_workbook
+
+    p = tmp_path / "x.xlsm"
+    _make_workbook(p)
+    wb = load_workbook(p, data_only=True, read_only=True)
+    try:
+        assert detect(wb) is True
+    finally:
+        wb.close()
+
+
+def test_parse_marketing_workbook(tmp_path: Path) -> None:
+    p = tmp_path / "x.xlsm"
+    _make_workbook(p)
+
+    spec = read_design(p)
+    assert spec.pipeline == "t"
+    assert spec.jobs == ("eid", "dm")
+    assert [len(l.columns) for l in spec.loads] == [2, 2]
+    assert {t.transform_type for t in spec.transforms} == {"JoinByExpression"}
+    # load 的 query 不能为空，否则解析器会把整个 load 丢掉
+    assert all(l.query for l in spec.loads)
+
+
+def test_ddl_mismatch_raises(tmp_path: Path) -> None:
+    """DDL 里有、表格里没有的列，必须报错而不是静默通过。"""
+    p = tmp_path / "x.xlsm"
+    _make_workbook(p, ddl_col="MISSING")
+
+    with pytest.raises(SpecReadError, match="DDL 和 EID to DM 表对不上"):
+        read_design(p)
