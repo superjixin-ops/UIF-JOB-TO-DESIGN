@@ -34,6 +34,12 @@ class TestNormalizeTable:
     def test_csv_is_a_file(self) -> None:
         assert normalize_table("COUNTRY_CODE_REF.csv") == "COUNTRY_CODE_REF.CSV"
 
+    def test_csv_keeps_original_case_in_location(self) -> None:
+        # box 的文件名大小写敏感，归一化只能用在对账的 key 上。
+        got = derive_sources(["join with `COUNTRY_CODE_REF.csv` on ctry_name"])
+        assert got[0].table == "COUNTRY_CODE_REF.CSV"
+        assert got[0].location == "COUNTRY_CODE_REF.csv"
+
 
 class TestInferConnector:
     def test_csv_goes_to_box(self) -> None:

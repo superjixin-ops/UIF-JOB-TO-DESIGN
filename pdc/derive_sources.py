@@ -102,7 +102,8 @@ def derive_sources(texts: list[str], landing_text: str = "") -> list[Source]:
     for text in texts:
         for pat in _LINK_PATTERNS:
             for m in pat.finditer(text or ""):
-                table = normalize_table(m.group(1))
+                raw = m.group(1).strip("` ")
+                table = normalize_table(raw)
                 if not table:
                     continue
                 alias = table
@@ -113,7 +114,9 @@ def derive_sources(texts: list[str], landing_text: str = "") -> list[Source]:
                     table=table,
                     raw=m.group(0)[:80],
                     connector=infer_connector(table),
-                    location=table,
+                    # 文件名保留原大小写：box 是大小写敏感的，
+                    # 归一化成 COUNTRY_CODE_REF.CSV 会让取数落空。
+                    location=raw if raw.lower().endswith(".csv") else table,
                     job="eid",
                 )
 

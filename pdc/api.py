@@ -43,8 +43,10 @@ from pdc.llm import OpenAICompatibleLLM, RuleBasedLLM
 from pdc.memory import Memory, SessionStore, recall
 from pdc.metrics import METRICS
 from pdc.paths import describe, out_dir, repo_dir
+from pdc.plan import compile_spec
 from pdc.safety import wrap_untrusted
 from pdc.security import RateLimiter, token_budget
+from pdc.spec_validator import validate_text
 from pdc.tools import Toolbox
 from pdc.trace import Tracer
 from pdc.yamlgen import requirement_from_design, run_build
@@ -494,7 +496,34 @@ def _execute_build(run_id: str, req: BuildRequest, design: Path) -> None:
     STORE.update(run_id, status="running")
     try:
         spec = read_design(design)
-        llm = OpenAICompatibleLLM(req.model or "deepseek-chat")
+
+        # 认识的模板家族：直接编译，不调模型。
+        # API 和 CLI 必须走同一条路，否则"同一个输入两个结果"。
+        compiled = compile_spec(spec)
+        if compiled is not None:
+            text, stats = compiled
+            issues = [
+                i for i in validate_text(text) if i.severity == "error"
+            ]
+            target = OUT / f"{spec.pipeline}.yaml"
+            target.write_text(text, encoding="utf-8")
+            status = "succeeded" if not issues else "failed"
+            STORE.update(
+                run_id,
+                status=status,
+                steps=1,
+                tokens_in=0,
+                tokens_out=0,
+                files={"yaml": str(target)},
+                issues=[f"{i.code}: {i.message}" for i in issues][:20],
+                output=(
+                    f"engine=plan jobs={stats['jobs']} "
+                    f"extracts={stats['extracts']} transforms={stats['transforms']}"
+                ),
+            )
+            return
+
+        llm = OpenAICompatibleLLM(req.model or "deepseek-flash")
         result = run_build(
             llm,
             requirement_from_design(spec),

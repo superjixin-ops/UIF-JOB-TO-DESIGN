@@ -692,7 +692,11 @@ def requirement_from_design(spec) -> Requirement:
         return Requirement(
             pipeline=spec.pipeline,
             prompt=prompt,
-            ground=lambda facts: check_text(prompt, facts),
+            ground=lambda facts: check_text(
+                prompt,
+                facts,
+                tuple((getattr(spec, "facts", None) or {}).get("allowed_aliases", ())),
+            ),
             item_count=expected_items(spec),
             label="imported",
             warnings=tuple(spec.warnings),

@@ -325,13 +325,24 @@ def cmd_agent(args: argparse.Namespace) -> int:
 
 
 def cmd_build(args: argparse.Namespace) -> int:
-    """设计文档 -> YAML。产物由模型写，校验器判。
+    """设计文档 -> YAML。
 
-    为什么没有 --mode offline：
-      一旦给这条路加一个"模板渲染"的离线实现，这个任务就退化成 workflow，
-      也就失去了它存在的意义。离线只能跑到"读出需求"这一步（--dry-run）。
+    两条路，按输入形态自动选：
+
+        认识的模板家族   确定性计划器生成（pdc/plan.py），不调模型
+        不认识           模型写，校验器判（pdc/yamlgen.py）
+
+    为什么不是"全部交给模型"：
+        模板家族内的顺序和参数是编译，不是翻译。模型每轮都会漏掉
+        不同的十步，而漏掉的那一步校验器看不出来（参数为空也合法）。
+        为什么不是"全部确定性"：
+        文档里的长段落（打分规则、哈希口径）必须理解，那是模型的工作。
+        所以是"确定性优先，模型兜底"，不是二选一。
     """
     from pdc.design_reader import SpecReadError, read_design
+    from pdc.parser import parse_pipeline
+    from pdc.plan import compile_spec
+    from pdc.spec_validator import validate_text
     from pdc.trace import Tracer
     from pdc.yamlgen import requirement_from_design, requirement_from_text, run_build
 
@@ -349,6 +360,7 @@ def cmd_build(args: argparse.Namespace) -> int:
     if os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY"):
         llm = _make_llm(args.model, getattr(args, "route", ""))
 
+    spec = None
     if source.suffix.lower() in {".xlsx", ".xlsm"}:
         try:
             spec = read_design(source, llm=llm)
@@ -371,9 +383,46 @@ def cmd_build(args: argparse.Namespace) -> int:
         print(req.prompt)
         return 0
 
+    # ---------- 确定性路径 ----------
+    compiled = (
+        compile_spec(spec)
+        if (spec is not None and args.engine != "model")
+        else None
+    )
+    if compiled is not None:
+        text, plan_stats = compiled
+        issues = [i for i in validate_text(text) if i.severity == "error"]
+        if issues:
+            # 确定性产物过不了自己的校验器，是编译器的 bug，不是输入的问题。
+            # 不退回模型——那会把 bug 藏起来，让它变成"偶发质量波动"。
+            print("❌ 计划器产物未通过结构校验（这是代码缺陷，不是文档问题）：", file=sys.stderr)
+            for i in issues:
+                print(f"  [{i.code}] {i.message}", file=sys.stderr)
+            return 1
+
+        target = out_dir / f"{req.pipeline}.yaml"
+        target.write_text(text, encoding="utf-8")
+        facts = parse_pipeline(target)
+        violations = req.ground(facts)
+        blocking = [v for v in violations if v.severity == "error"]
+        grounding = max(0.0, 1.0 - len(blocking) / max(req.item_count, 1))
+        print(json.dumps({
+            "status": "passed" if not blocking else "failed",
+            **plan_stats,
+            "grounding": round(grounding, 4),
+            "violations": [v.to_dict() for v in blocking],
+        }, ensure_ascii=False, indent=2))
+        if blocking:
+            print(f"\n❌ 弱契约未通过，产物保留在 {target}", file=sys.stderr)
+            return 1
+        print(f"\n✅ 校验通过，产物: {target}")
+        print(f"   下一步: uv run pdc parse {target}")
+        return 0
+
+    # ---------- 模型路径 ----------
     if llm is None:
         print(
-            "生成 YAML 必须用真实模型：产物是模型写的，没有模型就没有产物。\n"
+            "这份文档不属于已知模板家族，生成 YAML 需要模型。\n"
             "设置 OPENAI_API_KEY（或 DEEPSEEK_API_KEY）后重试；只看需求用 --dry-run。",
             file=sys.stderr,
         )
@@ -636,11 +685,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     a.set_defaults(func=cmd_agent)
 
-    b = sub.add_parser("build", help="设计文档 -> pipeline YAML（模型写，校验器判）")
+    b = sub.add_parser("build", help="设计文档 -> pipeline YAML（确定性优先，模型兜底）")
     b.add_argument("source", help=".xlsx 设计文档，或 .md/.txt 需求文本")
     b.add_argument("--name", default="", help="自由文本模式下指定 pipeline 名称")
     b.add_argument("--out", default=str(DEFAULT_OUT))
-    b.add_argument("--model", default="deepseek-chat")
+    b.add_argument("--model", default="deepseek-flash")
+    b.add_argument(
+        "--engine", choices=["auto", "model"], default="auto",
+        help="auto=认识的模板家族用计划器，其余用模型；model=强制走模型",
+    )
     b.add_argument("--max-rounds", type=int, default=8)
     b.add_argument("--budget", type=int, default=0, help="token 预算，0 表示不限")
     b.add_argument("--dry-run", action="store_true", help="只打印读到的需求，不调模型")

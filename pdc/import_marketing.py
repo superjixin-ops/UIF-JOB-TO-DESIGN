@@ -37,6 +37,7 @@ from pdc.design_reader import (
     SpecReadError,
     SpecTransform,
 )
+from pdc.profiles import allowed_aliases
 
 SOURCE_SHEET = "Source to EID - Dim, Fact name"
 DM_SHEET = "EID to DM - Dim, Fact name"
@@ -463,6 +464,94 @@ def _pipeline_from_text(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", m.group(1).lower()).strip("-")
 
 
+# 说明里出现这些词，说明目标列不是"搬过来"，而是"算出来"。
+# 这类列的源列要先改成中间名，目标列由后面的变换生成。
+_COMPUTED_HINTS = ("lookup", "convert", "generate", "hash", "md5", "join with", "cast")
+
+
+def _parse_landing(text: str) -> dict[str, str]:
+    """从 Landing source 里取出 core / historical 的 basePath。
+
+    原话长这样（一个格子里两行）：
+        core: /epm-marketing-*-2/LANDING_ZONE/fact/.../transform.parquet/date_week=XXXXXX/xxxxx.parquet
+        historical: /epm-marketing-*-2/LANDING_ZONE/fact/.../historical/transform.parquet/...
+
+    extract 要的是 bucket 之后、分区之前的那一段。
+    """
+    out: dict[str, str] = {}
+    for line in str(text or "").splitlines():
+        m = re.match(r"\s*(core|historical)\s*:\s*(\S+)", line, re.IGNORECASE)
+        if not m:
+            continue
+        kind, path = m.group(1).lower(), m.group(2)
+        path = re.sub(r"^/[^/]+/", "", path)          # 去掉 bucket
+        path = re.split(r"/date_week=", path, flags=re.IGNORECASE)[0]
+        out[kind] = path.rstrip("/")
+    return out
+
+
+def _parse_output(text: str) -> str:
+    """从 'fact/FACT_X/DATE_WEEK=XXXXXX/*.parquet' 里取落地目录。"""
+    m = re.search(r"(fact/[A-Za-z0-9_]+)", text or "")
+    return m.group(1) if m else ""
+
+
+def _read_column_meta(rows: list[tuple], idx: dict[str, int]) -> tuple[dict[str, str], dict[str, str]]:
+    """读出"源列 -> 落地列名"和每列的说明。
+
+    坑：有些行是计算列，源列名被写在了上一行，整列错位一格。
+    实测 LOCATION_COMPANY_KEY 的 Json Source Columns 写的是 Domain，
+    而 Domain 属于下一行的 INTENT_DOMAIN_NAME。
+
+    判定规则：只有说明里要求 rename / simple movement 的列才认领源列名，
+    计算列不认领——错位就此止住。
+    """
+    mapping: dict[str, str] = {}
+    notes: dict[str, str] = {}
+    pending = ""
+    for row in rows[1:]:
+        target = _cell(row, idx, "Target Column")
+        if not target:
+            continue
+        target = str(target).strip()
+        note = " ".join(
+            str(_cell(row, idx, c) or "")
+            for c in ("Transformation 1", "Transformation 2")
+        ).strip()
+        notes[target] = note
+
+        raw_src = _cell(row, idx, "Json Source Columns")
+        if raw_src:
+            pending = str(raw_src).strip()
+
+        low = note.lower()
+        if not pending or not ("rename" in low or "movement" in low):
+            continue
+        if any(h in low for h in _COMPUTED_HINTS):
+            # 算出来的列：源列先落到历史表里的物理列名，目标列后面再生成。
+            hist = _cell(row, idx, "Historical Intent")
+            mapping[pending] = str(hist).strip() if hist else target
+        else:
+            mapping[pending] = target
+        pending = ""
+    return mapping, notes
+
+
+def _parse_dup_keys(note: str, source_map: dict[str, str]) -> list[str]:
+    """从 'duplicates only when all of the following fields are identical: ...' 里取去重键。"""
+    m = re.search(r"identical\s*:\s*(.+)", note or "", re.IGNORECASE)
+    if not m:
+        return []
+    rev = {src.lower(): dst for src, dst in source_map.items()}
+    keys: list[str] = []
+    for name in re.findall(r"`([^`]+)`", m.group(1)):
+        key = rev.get(name.strip().lower(), name.strip())
+        if key not in keys:
+            keys.append(key)
+    return keys
+
+
+
 def read_single(path: str | Path, llm=None) -> DesignSpec:
     p = Path(path)
     wb = load_workbook(p, data_only=True, read_only=True)
@@ -587,8 +676,11 @@ def read_single(path: str | Path, llm=None) -> DesignSpec:
 
         if unknown:
             names = [u["target"] for u in unknown]
+            # 这些段落不在变换表里，但也不是"丢了"：
+            # 模板家族的计划器会把它们实现成具体步骤；
+            # 只有退回模型时才会跳过。两种路径都要说清楚。
             warnings.append(
-                f"{len(unknown)} 条变换无法翻译，已跳过（需人工确认）："
+                f"{len(unknown)} 条长段落不在变换表里（计划器会实现，退回模型时跳过）："
                 + "；".join(names[:5])
             )
 
@@ -639,7 +731,36 @@ def read_single(path: str | Path, llm=None) -> DesignSpec:
         ).strip("-")
         table_name = pipeline.replace("-", "_").upper()
 
-        warnings.append("连接信息来自文档叙述，credentials 按 connector 填，需人工确认")
+        source_map, notes = _read_column_meta(rows, idx)
+        landing_paths = _parse_landing(landing)
+        output_text = " ".join(str(c) for r in rows[:2] for c in r if c)
+        load_path = _parse_output(output_text)
+        fact_name = load_path.rsplit("/", 1)[-1] if load_path else table_name
+
+        # 计划器要的原始事实。放在 facts 里而不是塞进每一列：
+        # 它们描述的是整份文档，不是某一列。
+        facts: dict = {
+            "job_type": job_type,
+            "main_alias": "BOMBORA_DF",
+            "main_base_path": landing_paths.get("core", ""),
+            "hist_base_path": landing_paths.get("historical", ""),
+            "load_path": load_path,
+            "table_name": fact_name,
+            "documentation": fact_name.replace("_", " ") + " in Eid",
+            "source_map": source_map,
+            "dup_keys": _parse_dup_keys(notes.get("DUP_REC_CNT", ""), source_map),
+            "has_hist_delta": has_dup,
+            "null_rule": null_rule,
+            "size": "M",
+            # 别名是模板家族的约定，不在文档原文里。
+            # 弱契约检查要知道哪些别名是"家族给的"，哪些是编的。
+            "allowed_aliases": allowed_aliases(),
+        }
+
+        warnings.append(
+            "连接参数来自模板家族配置（box 根目录、bucket 别名），换环境需确认"
+        )
+        warnings.append("owner 与 setups.size 不在文档里，已留空/取默认值，提交前补")
 
         extracts = tuple(
             SpecExtract(
@@ -680,6 +801,8 @@ def read_single(path: str | Path, llm=None) -> DesignSpec:
             source_path=str(p),
             warnings=tuple(warnings),
             weak=True,
+            profile="marketing_intent",
+            facts=facts,
         )
     finally:
         wb.close()

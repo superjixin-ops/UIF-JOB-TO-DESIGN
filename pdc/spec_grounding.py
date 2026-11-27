@@ -477,11 +477,20 @@ def identifiers_in(text: str) -> set[str]:
     return set(IDENT_RE.findall(text or ""))
 
 
-def check_text(text: str, facts: PipelineFacts) -> list[SpecViolation]:
-    """自由文本版事实对齐：实体必须能在原文里找到。"""
+def check_text(
+    text: str,
+    facts: PipelineFacts,
+    allowed_aliases: tuple[str, ...] = (),
+) -> list[SpecViolation]:
+    """自由文本版事实对齐：实体必须能在原文里找到。
+
+    allowed_aliases 是模板家族声明的别名。它们不在原文里，
+    但也不是编的——是家族约定。不传就按原文判，传了就放行这一批。
+    """
     out: list[SpecViolation] = []
     haystack = (text or "").lower()
     allowed = identifiers_in(text)
+    trusted = set(allowed_aliases)
 
     for job in facts.jobs:
         for col in (job.load.schema if job.load else ()):
@@ -494,7 +503,9 @@ def check_text(text: str, facts: PipelineFacts) -> list[SpecViolation]:
                     )
                 )
         for e in job.extracts:
-            if e.alias not in allowed and e.alias.lower() not in haystack:
+            if e.alias in trusted:
+                pass
+            elif e.alias not in allowed and e.alias.lower() not in haystack:
                 out.append(
                     SpecViolation(
                         "T_ALIAS_FABRICATED",

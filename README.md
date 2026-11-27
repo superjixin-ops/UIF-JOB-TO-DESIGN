@@ -2,14 +2,14 @@
 
 [![CI](https://github.com/superjixin-ops/UIF-JOB-TO-DESIGN/actions/workflows/ci.yml/badge.svg)](https://github.com/superjixin-ops/UIF-JOB-TO-DESIGN/actions/workflows/ci.yml)
 
-> 读流水线配置生成设计文档，也把设计文档写回流水线——**正向不用模型，反向模型写、校验器判。**
+> 读流水线配置生成设计文档，也把设计文档写回流水线——**正向不用模型；反向确定性优先，模型兜底。**
 
 | | |
 |---|---|
 | 仓库 | [superjixin-ops/UIF-JOB-TO-DESIGN](https://github.com/superjixin-ops/UIF-JOB-TO-DESIGN) |
 | 在线演示 | `https://3eea34987613e6.app.lhr.life`（临时隧道，token `demo-token`） |
-| 规模 | **300 测试通过 / 1 跳过** · 47 模块 · 10,427 行主代码 + 3,556 行测试 · mypy 0 错误 · 覆盖率 79% |
-| 效果 | 设计文档 **4 小时 → 13 秒**；反向生成 **留一法 12/12 通过**，平均 1.92 轮、单条约 5.6 万 token；设计文档零丢字段；143 个键值与源文件零差异 |
+| 规模 | **340 测试通过 / 1 跳过** · 52 模块 · 12,749 行主代码 + 4,381 行测试 · mypy 0 错误 · 覆盖率 79% |
+| 效果 | 设计文档 **4 小时 → 13 秒**；反向生成 **留一法 12/12 通过**，平均 1.92 轮、单条约 5.6 万 token；**模板家族 71 个变换 0 token**；设计文档零丢字段；143 个键值与源文件零差异 |
 | 技术栈 | Python 3.12 · FastAPI · asyncio · SQLite · LangGraph · LangChain · MCP · pgvector |
 | 只看结论 | [一页纸](docs/one-pager.md)——3 个数字、3 句话、5 个边界，无代码 |
 
@@ -37,24 +37,38 @@
 |---|---|---|
 | 输入 | pipeline YAML | 设计文档（xlsx / md） |
 | 输出 | 8 张表的设计文档 | **可运行的 pipeline YAML** |
-| 谁写产物 | 代码 | **模型** |
-| 模型负责 | 决定查什么、怎么叙述 | 决定读哪个示例、怎么改 |
+| 谁写产物 | 代码 | **认识的模板家族：代码；其余：模型** |
+| 模型负责 | 决定查什么、怎么叙述 | 长段落 → 表达式 |
 | 终止条件 | 步数 / 校验 | **校验器通过** |
-| 离线能跑吗 | 能（SOP 模式） | **不能**——没有模型就没有产物 |
+| 离线能跑吗 | 能（SOP 模式） | **模板家族能，其余不能** |
 
-build 方向才是"真 Agent"的判定标准：**产物是模型写的，失败无法伪装。**
-YAML 解析不了就是解析不了，列对不上就是跑不起来。
+为什么不是"全部交给模型"：一份真实文档是 **2 个 job、9 个数据源、71 个变换**。
+顺序和参数是编译，不是翻译。模型每一轮都会漏掉不同的十步，而漏掉的那一步
+校验器看不出来——`Trim` 少一个 `columns`、`RenameColumns` 少 `mapColumns`
+都是合法 YAML，语义却变成了空操作。
+
+为什么不是"全部确定性"：文档里的长段落（公司关联打分、哈希口径、去重规则）
+必须理解。所以是**确定性优先，模型兜底**，不是二选一。
 
 ```bash
 # 1) YAML -> 设计文档
 uv run pdc design samples/pipelines/fact-order-fulfillment.yaml
 
-# 2) 设计文档 -> YAML（模型写，校验器判）
+# 2) 设计文档 -> YAML（认识的模板家族走计划器，0 token；其余走模型）
 uv run pdc build out/fact-order-fulfillment-design.xlsx
 
 # 3) 验证产物真的能用
 uv run pdc parse out/fact-order-fulfillment.yaml
 ```
+
+同一份营销意图文档，两条路的对比：
+
+| | 模型写 | 计划器 |
+|---|---|---|
+| job / 数据源 / 变换 | 1 / 1 / 15 | **2 / 9 / 71** |
+| 与手写实现对齐 | 结构不同 | **变换类型分布逐项相同** |
+| token | 约 11 万 | **0** |
+| 耗时 | 约 40 秒 | **0.2 秒** |
 
 **控制流三件事**：
 
@@ -148,7 +162,7 @@ uv run pdc run samples/pipelines
 
 | 模块 | 实现 | 一句话 |
 |---|---|---|
-| 01 基础概念 | 两个入口 + 两个方向 | 给文件是工作流，给目录是 Agent；build 是产物由模型写 |
+| 01 基础概念 | 两个入口 + 两个方向 | 给文件是工作流，给目录是 Agent；build 先编译、编译不了才问模型 |
 | 02 核心框架 | `agent.py` / `planner.py` / `langgraph_engine.py` / `langchain_engine.py` | 五个引擎：ReAct / Plan / 多 Agent / LangGraph / LangChain |
 | 03 RAG | `rag.py` / `rerank.py` / `embed.py` | BM25 + 向量 + α 调参 + 重排，有实测曲线 |
 | 04 工具调用 | `tools.py` / `mcp_client.py` / `mcp_server.py` / `skills.py` | 9 本地工具 + MCP 远端工具 + Skill 渐进披露 |
@@ -168,6 +182,13 @@ pdc/
   ir.py / design.py        事实 → 文档结构（可单测）
   render.py                IR → xlsx / md
   validate.py / grounding.py / citations.py   三层校验
+  design_reader.py         设计文档 → 结构化需求（强/弱契约）
+  import_marketing.py      营销模板解析（三表 / 单表）
+  derive_sources.py        从叙述里推导数据源（join/lookup/merge）
+  plan.py                  需求 → 实现计划（确定性，认识的模板家族）
+  emit.py                  计划 → YAML（纯函数）
+  profiles.py              模板家族的连接约定（别名、路径、连接器）
+  yamlgen.py               模型写 YAML 的循环（不认识的文档走这里）
   agent.py                 ReAct 循环 + 预算 + 取消
   planner.py               Plan-and-Execute
   multiagent.py            Supervisor + Worker
@@ -191,7 +212,7 @@ pdc/
 ops/       告警规则 + 检查脚本
 eval/      四指标评测 + 审计 golden set + 反向生成留一法 + 逐键保真审计
 rag/       检索评测（样例语料可复现）、α 扫描、A/B、引用分析
-tests/     301 个用例（300 通过 / 1 跳过）
+tests/     342 个用例（340 通过 / 1 跳过 / 1 只读环境跳过）
 loadtest/  并发压测
 samples/   虚构样例数据（可公开）
 scripts/   本地启动 + 隧道 + 语料结构统计
@@ -1101,7 +1122,7 @@ export PDC_API_TOKEN=your-token
 
 ```
 POST /runs          → 202 {run_id, status:"queued"}   设计文档方向
-POST /build         → 202 {run_id, kind:"build"}      YAML 方向（需真实模型）
+POST /build         → 202 {run_id, kind:"build"}      YAML 方向（模板家族不调模型）
 GET  /designs       → out/ 下可用的设计文档
 GET  /runs/{id}     → status: queued|running|succeeded|failed|cancelled
 GET  /runs/{id}/trace   → 每一步

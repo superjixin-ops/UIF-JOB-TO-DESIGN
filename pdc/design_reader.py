@@ -115,6 +115,12 @@ class DesignSpec:
     warnings: tuple[str, ...] = field(default_factory=tuple)
     # 外来文档（不是本工具产出的）：变换是自然语言，只能做弱契约。
     weak: bool = False
+    # 认识的模板家族。非空时 plan.py 可以确定性生成，不用调模型。
+    profile: str = ""
+    # 计划器要用的原始事实（源列名、去重键、落地路径、空值规则）。
+    # 放在这里而不是塞进 SpecColumn，是因为它描述的是"整份文档"，
+    # 不是"某一列"——塞进列里会让列的签名变成两份文档无法比对。
+    facts: dict = field(default_factory=dict)
 
     # ---------- 给模型看的视图 ----------
 
