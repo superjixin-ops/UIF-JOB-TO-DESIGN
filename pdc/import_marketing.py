@@ -28,6 +28,7 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 
+from pdc.derive_sources import derive_sources
 from pdc.design_reader import (
     DesignSpec,
     SpecColumn,
@@ -498,6 +499,27 @@ def read_single(path: str | Path, llm=None) -> DesignSpec:
         if not columns:
             raise SpecReadError("没有解析出任何目标列")
 
+        # 数据源：主源 + 变换说明里 join/lookup/merge 提到的表。
+        # 只写一个 SOURCE 的话，后面所有 join 都落空。
+        texts = [
+            str(_cell(r, idx, c))
+            for r in rows[1:]
+            for c in ("Transformation 1", "Transformation 2")
+            if _cell(r, idx, c)
+        ]
+        landing = ""
+        for r in rows[1:]:
+            v = _cell(r, idx, "Landing source")
+            if v:
+                landing = str(v)
+                break
+        sources = derive_sources(texts, landing)
+        # SFTP 这类来源信息常写在表头的说明格里，所以扫全表而不只是变换列
+        whole_text = " ".join(str(c) for r in rows for c in r if c).lower()
+        job_type = "eid-sftp" if "sftp" in whole_text else "eid"
+        dup_job = f"{job_type}-dup"
+        has_dup = any(s.job.endswith("-dup") for s in sources)
+
         # 变换
         transforms: list[SpecTransform] = []
         step = 0
@@ -531,7 +553,7 @@ def read_single(path: str | Path, llm=None) -> DesignSpec:
                             params = {"mapColumns": {source: str(name)}}
                     transforms.append(
                         SpecTransform(
-                            job="eid",
+                            job=job_type,
                             step=step,
                             transform_type=t,
                             inputs=("SOURCE",),
@@ -551,7 +573,7 @@ def read_single(path: str | Path, llm=None) -> DesignSpec:
                     step += 1
                     transforms.append(
                         SpecTransform(
-                            job="eid",
+                            job=job_type,
                             step=step,
                             transform_type=st["transformType"],
                             inputs=("SOURCE",),
@@ -578,32 +600,44 @@ def read_single(path: str | Path, llm=None) -> DesignSpec:
         ).strip("-")
         table_name = pipeline.replace("-", "_").upper()
 
-        warnings.append("文档未提供连接信息，已填占位路径，需人工确认")
+        warnings.append("连接信息来自文档叙述，credentials 按 connector 填，需人工确认")
+
+        extracts = tuple(
+            SpecExtract(
+                job=dup_job if s.job.endswith("-dup") else job_type,
+                alias=s.alias,
+                connector=s.connector,
+                credentials=s.connector,
+                query=s.location,
+                main_df=(s.alias == "BOMBORA_DF"),
+            )
+            for s in sources
+        )
+
+        jobs = (job_type,) + ((dup_job,) if has_dup else ())
+        job_sizes = tuple((j, "M") for j in jobs)
+        loads = tuple(
+            SpecLoad(
+                job=j,
+                object_name=table_name,
+                query=f"fact/{table_name}",
+                metadata_name=table_name,
+                columns=tuple(columns),
+                schema_declared=True,
+            )
+            for j in jobs
+        )
 
         return DesignSpec(
             pipeline=pipeline,
             kind="FactPipeline",
             owner="",
             sizing="M",
-            jobs=("eid",),
-            job_sizes=(("eid", "M"),),
-            extracts=(
-                SpecExtract(
-                    job="eid", alias="SOURCE", connector="", credentials="",
-                    query=f"landing/{pipeline}", main_df=True,
-                ),
-            ),
+            jobs=jobs,
+            job_sizes=job_sizes,
+            extracts=extracts,
             transforms=tuple(merge_renames(transforms)),
-            loads=(
-                SpecLoad(
-                    job="eid",
-                    object_name=table_name,
-                    query=f"fact/{table_name}",
-                    metadata_name=table_name,
-                    columns=tuple(columns),
-                    schema_declared=True,
-                ),
-            ),
+            loads=loads,
             source_path=str(p),
             warnings=tuple(warnings),
             weak=True,
