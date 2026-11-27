@@ -592,6 +592,45 @@ def read_single(path: str | Path, llm=None) -> DesignSpec:
                 + "；".join(names[:5])
             )
 
+        # 全局空值规则：文档里一格写着"string -> 'Unassigned'，int -> -1"。
+        # 这是**一条规则作用于所有列**，不是每列一句说明。
+        # 参考实现用两个批量 FillNA 完成，而不是 22 个重复步骤。
+        null_rule = ""
+        for h in header:
+            if h.lower().startswith("null handling"):
+                null_rule = str(_cell(rows[1], idx, h) or "")
+                break
+        if null_rule:
+            int_types = {"IntegerType", "LongType"}
+            str_cols = [c.name for c in columns if c.data_type not in int_types]
+            int_cols = [c.name for c in columns if c.data_type in int_types]
+            if str_cols:
+                step += 1
+                transforms.append(
+                    SpecTransform(
+                        job=job_type,
+                        step=step,
+                        transform_type="FillNA",
+                        inputs=("SOURCE",),
+                        output="SOURCE",
+                        detail="全局空值规则：字符串列填空串占位值",
+                        params={"columns": str_cols, "value": "Unassigned"},
+                    )
+                )
+            if int_cols:
+                step += 1
+                transforms.append(
+                    SpecTransform(
+                        job=job_type,
+                        step=step,
+                        transform_type="FillNA",
+                        inputs=("SOURCE",),
+                        output="SOURCE",
+                        detail="全局空值规则：数值列填 -1",
+                        params={"columns": int_cols, "value": -1},
+                    )
+                )
+
         # 流水线名：输出路径可能写在表头格里，也可能写在第一行数据里。
         # 两处都扫一遍，取不到再用文件名兜底。
         out_text = " ".join(str(c) for r in rows[:2] for c in r if c)
