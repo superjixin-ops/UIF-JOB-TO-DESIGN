@@ -127,7 +127,12 @@ def connector_docs(docs: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]
 
 
 # ---------------------------------------------------------------- 语料
-def scan_corpus(root: str | Path, *, samples: int = 2) -> dict[str, Any]:
+def scan_corpus(
+    root: str | Path,
+    *,
+    samples: int = 2,
+    exclude: set[str] | None = None,
+) -> dict[str, Any]:
     """扫真实流水线，统计每个变换/连接器的参数出现率。
 
     只统计"键在不在"，不统计值——值是这条流水线独有的，
@@ -148,7 +153,10 @@ def scan_corpus(root: str | Path, *, samples: int = 2) -> dict[str, Any]:
                 {k: v for k, v in item.items() if k not in UNIVERSAL_TRANSFORM}
             )
 
+    skip = exclude or set()
     for p in Path(root).rglob("*.yaml"):
+        if str(p) in skip:
+            continue
         try:
             d = yaml.safe_load(p.read_text(encoding="utf-8"))
         except (yaml.YAMLError, OSError, UnicodeDecodeError):

@@ -292,6 +292,24 @@ class TestScanCorpus:
         assert "transformType" not in got["transforms"]["Sort"]["samples"][0]
 
 
+    def test_exclude_paths(self, tmp_path) -> None:
+        """留一法评测：把目标 pipeline 从语料里剔除再建字典。"""
+        f = tmp_path / "a.yaml"
+        f.write_text(
+            "apiVersion: crd.ibm.k8s.io/v1\n"
+            "kind: FactPipeline\n"
+            "metadata: {name: t}\n"
+            "spec:\n"
+            "  jobs:\n"
+            "    - jobType: eid\n"
+            "      setups: {size: T}\n"
+            "      extract: []\n",
+            encoding="utf-8",
+        )
+        assert scan_corpus(tmp_path)["files"] == 1
+        assert scan_corpus(tmp_path, exclude={str(f)})["files"] == 0
+
+
 class TestJoinDialect:
     def test_legacy_uses_map_columns(self) -> None:
         step = join_step("A", "B", {"ID": "ID"}, alias="A")
