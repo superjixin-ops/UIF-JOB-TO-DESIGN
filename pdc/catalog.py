@@ -194,6 +194,9 @@ INJECTED = {
     "data_objects_collection",
     "token",
     "object_names",
+    # step 由 loader 按顺序注入，不是 YAML 字段。
+    # ForeignKey / ProcessLads 把它写在 __init__ 里，不跳过会误报"缺 step"。
+    "step",
 }
 
 
@@ -249,9 +252,13 @@ def parse_source(text: str, module: str = "") -> dict[str, dict[str, Any]]:
             default = default.strip()
         else:
             head, default, required = raw, None, True
-        if ":" not in head:
-            continue
-        name, typ = head.split(":", 1)
+        # 真实源码里大量参数没有类型标注：
+        #     def __init__(self, spark_factory, columns, value, objectNames=None)
+        # 只认带冒号的会把 AddColumns（34,186 次）整个漏掉。
+        if ":" in head:
+            name, typ = head.split(":", 1)
+        else:
+            name, typ = head, ""
         name = name.strip()
         if not IDENT_RE.match(name) or _is_injected(name):
             continue
@@ -266,12 +273,15 @@ def parse_source(text: str, module: str = "") -> dict[str, dict[str, Any]]:
 def scan_sources(root: str | Path) -> dict[str, dict[str, Any]]:
     """扫一个源码目录，按类名合并。"""
     out: dict[str, dict[str, Any]] = {}
-    for p in Path(root).glob("*.py"):
+    # 递归：transformations/ 下面还有 core / dimensions / datamart 等子目录。
+    for p in sorted(Path(root).rglob("*.py")):
         try:
             got = parse_source(p.read_text(encoding="utf-8"), p.stem)
         except (OSError, UnicodeDecodeError):
             continue
-        out.update(got)
+        for cls, card in got.items():
+            # 同名类以先扫到的为准，避免子目录里的辅助类覆盖主实现。
+            out.setdefault(cls, card)
     return out
 
 
@@ -468,6 +478,8 @@ def check(facts: Any, catalog: dict[str, Any]) -> list[Issue]:
     types = catalog.get("transforms") or {}
     conns = catalog.get("connectors") or {}
 
+    seen: set[tuple[str, str, str]] = set()
+
     for job in facts.jobs:
         for t in job.transforms:
             card = types.get(t.transform_type)
@@ -485,6 +497,16 @@ def check(facts: Any, catalog: dict[str, Any]) -> list[Issue]:
             # 不补这一行，每个 SparkSql 都会被误报"缺 query"。
             if t.sql is not None:
                 present.add("query")
+
+            # Join 的两套方言是互斥的。写了 legacy 的 mapColumns，
+            # 就不该再因为没写 current 的 joinMapping/left/right 报警——
+            # 那不是缺参数，是选了另一套。实测这一条能消掉 795 条噪声。
+            suppress: set[str] = set()
+            if t.transform_type == "Join":
+                if "mapColumns" in present:
+                    suppress = {"joinMapping", "left", "right"}
+                elif "joinMapping" in present:
+                    suppress = {"mapColumns"}
 
             # Join 有两套方言，混用是非法 YAML。集群跑哪一套不确定时，
             # 至少要保证"一条 pipeline 里只用一种"。
@@ -508,7 +530,13 @@ def check(facts: Any, catalog: dict[str, Any]) -> list[Issue]:
                         )
                     )
             for pname, meta in card["params"].items():
-                if meta["trust"] == REQUIRED and pname not in present:
+                if pname in present:
+                    continue
+                key = (job.job_type, t.transform_type, pname)
+                if key in seen:
+                    continue
+                if meta["trust"] == REQUIRED:
+                    seen.add(key)
                     issues.append(
                         Issue(
                             "C_MISSING_PARAM",
@@ -516,7 +544,8 @@ def check(facts: Any, catalog: dict[str, Any]) -> list[Issue]:
                             f"补上 {pname}",
                         )
                     )
-                if meta["trust"] == CONFLICT and pname not in present:
+                elif meta["trust"] == CONFLICT and pname not in suppress:
+                    seen.add(key)
                     issues.append(
                         Issue(
                             "C_CONFLICT_PARAM",
@@ -525,8 +554,6 @@ def check(facts: Any, catalog: dict[str, Any]) -> list[Issue]:
                             "确认平台版本后再决定写不写",
                         )
                     )
-                if pname not in present:
-                    continue
             for pname in present:
                 if pname not in card["params"]:
                     issues.append(

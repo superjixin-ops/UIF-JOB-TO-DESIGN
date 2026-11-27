@@ -21,6 +21,7 @@ from pdc.catalog import (
     parse_doc_html,
     parse_source,
     scan_corpus,
+    scan_sources,
     trust_of,
 )
 from pdc.parser import parse_pipeline
@@ -331,10 +332,36 @@ class TestSource:
         assert params["dimensionType"]["default"] == '"two"'
         assert params["deltaColumns"]["default"] == "None"
 
+    def test_untyped_params_are_kept(self) -> None:
+        # 真实源码：def __init__(self, spark_factory, columns, value, objectNames=None)
+        src = """
+class AddColumns(Transformation):
+    def __init__(self, spark_factory, columns, value, objectNames=None):
+        pass
+"""
+        params = parse_source(src)["AddColumns"]["params"]
+        assert params["columns"]["required"] is True
+        assert params["value"]["required"] is True
+        assert "objectNames" not in params
+
     def test_injected_params_are_skipped(self) -> None:
         params = parse_source(SOURCE)["AddSurrogateKey"]["params"]
         for name in ("self", "spark_factory", "config", "objectNames"):
             assert name not in params
+
+    def test_scan_sources_recurses(self, tmp_path) -> None:
+        # transformations/ 下面还有 core / dimensions / datamart 子目录。
+        sub = tmp_path / "core"
+        sub.mkdir()
+        (sub / "sort.py").write_text(
+            "class Sort(Transformation):\n"
+            "    def __init__(self, spark_factory, orderBy=None):\n"
+            "        pass\n",
+            encoding="utf-8",
+        )
+        got = scan_sources(tmp_path)
+        assert "Sort" in got
+        assert got["Sort"]["params"]["orderBy"]["required"] is False
 
     def test_source_required_beats_missing_docs(self) -> None:
         corpus = {
@@ -417,6 +444,38 @@ class TestJoinCheck:
         )
         codes = [i.code for i in check(parse_pipeline(path), self._catalog())]
         assert "C_JOIN_DIALECT_MIXED" in codes
+
+    def _catalog_with_conflict(self) -> dict:
+        corpus = {
+            "files": 100,
+            "transforms": {
+                "Join": {"count": 100, "keys": {"mapColumns": 100}, "samples": []}
+            },
+            "extracts": {},
+            "loads": {},
+        }
+        docs = {
+            "Join": {
+                "page": "core",
+                "params": [{"name": "joinMapping", "required": True, "default": None}],
+            }
+        }
+        return build(
+            corpus,
+            docs,
+            {"transforms": {"Join": {"required": [], "props": []}}, "connectors": {}, "connector_enum": []},
+        )
+
+    def test_legacy_join_does_not_report_current_conflict(self, tmp_path) -> None:
+        """选了 legacy 方言，就不该再因为没写 current 参数报警。"""
+        path = self._pipeline(tmp_path, "          mapColumns: {ID: ID}\n")
+        codes = [i.code for i in check(parse_pipeline(path), self._catalog_with_conflict())]
+        assert "C_CONFLICT_PARAM" not in codes
+
+    def test_join_without_any_dialect_is_reported(self, tmp_path) -> None:
+        path = self._pipeline(tmp_path, "          how: left\n")
+        codes = [i.code for i in check(parse_pipeline(path), self._catalog_with_conflict())]
+        assert "C_CONFLICT_PARAM" in codes
 
     def test_current_without_left_right(self, tmp_path) -> None:
         path = self._pipeline(
