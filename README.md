@@ -197,6 +197,22 @@ samples/   虚构样例数据（可公开）
 scripts/   本地启动 + 隧道 + 语料结构统计
 ```
 
+**目录速查**
+
+| 目录 | 一句话 | 怎么用 |
+|---|---|---|
+| `pdc/` | 源码，唯一会被打进安装包 | `import pdc` |
+| `tests/` | 判断"对不对" | `uv run pytest -q` |
+| `eval/` | 判断"好不好" | `uv run python -m eval.build_eval` |
+| `rag/` | 判断"找得准不准" | `uv run python -m rag.eval_sample` |
+| `samples/` | 虚构样例数据 | 被测试和评测引用 |
+| `scripts/` | 手动运维工具 | `./scripts/serve.sh` |
+| `docs/` | 设计文档 | 直接打开看 |
+| `ops/` | 告警规则 | 被 `check_alerts.py` 读取 |
+| `loadtest/` | 并发压测 | `uv run python -m loadtest.run` |
+
+> 只有 `pdc/` 会被打进安装包，其余都是开发和运维时用的。
+
 ---
 
 ## 文档地图
