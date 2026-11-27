@@ -608,13 +608,20 @@ def cmd_catalog(args: argparse.Namespace) -> int:
             return 2
         corpus = cat.scan_corpus(corpus_dir)
         docs = cat.load_docs(args.docs) if args.docs else {}
-        built = cat.build(corpus, docs, cat.load_schema(schema_path))
+        sources = cat.scan_sources(args.sources) if args.sources else {}
+        built = cat.build(
+            corpus,
+            docs,
+            cat.load_schema(schema_path),
+            sources,
+        )
         out = cat.write(built, args.out)
         print(json.dumps({
             "pipelines": built["source"]["pipelines"],
             "transforms": built["source"]["transforms"],
             "types": len(built["transforms"]),
             "connectors": len(built["connectors"]),
+            "source_files": len(sources),
             "out": str(out),
         }, ensure_ascii=False, indent=2))
         return 0
@@ -819,6 +826,7 @@ def main(argv: list[str] | None = None) -> int:
     ca.add_argument("target", nargs="?", default="", help="show 的类型名，或 check 的 YAML 路径")
     ca.add_argument("--corpus", default="", help="真实流水线目录")
     ca.add_argument("--docs", default="", help="抓取阶段产出的 docs.json")
+    ca.add_argument("--sources", default="", help="变换源码目录（__init__ 签名）")
     ca.add_argument("--schema", default="", help="pipeline-schema.json")
     ca.add_argument("--html-dir", default="", help="docs 动作：抓下来的 HTML 目录")
     ca.add_argument("--out", default="out/catalog.json")

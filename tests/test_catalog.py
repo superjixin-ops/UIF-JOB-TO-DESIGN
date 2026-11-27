@@ -19,6 +19,7 @@ from pdc.catalog import (
     build,
     check,
     parse_doc_html,
+    parse_source,
     scan_corpus,
     trust_of,
 )
@@ -302,3 +303,125 @@ class TestJoinDialect:
         assert step["joinMapping"] == {"A.ID": "B.ID"}
         assert step["left"] == "A" and step["right"] == "B"
         assert "mapColumns" not in step
+
+
+SOURCE = '''
+class AddSurrogateKey(Transformation):
+    def __init__(
+        self,
+        spark_factory: SparkFactory,
+        config: CredentialsHelper,
+        naturalKeys: list,
+        surrogateKeyName: str,
+        dimensionType: Optional[str] = "two",
+        deltaColumns: Optional[list] = None,
+        objectNames: Optional[list] = None,
+    ) -> None:
+        pass
+'''
+
+
+class TestSource:
+    def test_required_vs_optional(self) -> None:
+        got = parse_source(SOURCE, "add_surrogate_key")
+        params = got["AddSurrogateKey"]["params"]
+        assert params["naturalKeys"]["required"] is True
+        assert params["surrogateKeyName"]["required"] is True
+        assert params["dimensionType"]["required"] is False
+        assert params["dimensionType"]["default"] == '"two"'
+        assert params["deltaColumns"]["default"] == "None"
+
+    def test_injected_params_are_skipped(self) -> None:
+        params = parse_source(SOURCE)["AddSurrogateKey"]["params"]
+        for name in ("self", "spark_factory", "config", "objectNames"):
+            assert name not in params
+
+    def test_source_required_beats_missing_docs(self) -> None:
+        corpus = {
+            "files": 100,
+            "transforms": {
+                "AddSurrogateKey": {
+                    "count": 100,
+                    "keys": {"naturalKeys": 100, "dimensionType": 5},
+                    "samples": [],
+                }
+            },
+            "extracts": {},
+            "loads": {},
+        }
+        sources = parse_source(SOURCE)
+        built = build(
+            corpus,
+            {},
+            {"transforms": {}, "connectors": {}, "connector_enum": []},
+            sources,
+        )
+        card = built["transforms"]["AddSurrogateKey"]
+        assert card["params"]["naturalKeys"]["trust"] == REQUIRED
+        # 源码给了默认值，语料 5% 才写 → 可选，不是"废弃"
+        assert card["params"]["dimensionType"]["trust"] == OPTIONAL
+
+
+class TestJoinCheck:
+    def _catalog(self) -> dict:
+        corpus = {
+            "files": 100,
+            "transforms": {
+                "Join": {
+                    "count": 100,
+                    "keys": {"mapColumns": 100, "how": 100},
+                    "samples": [],
+                }
+            },
+            "extracts": {},
+            "loads": {},
+        }
+        return build(
+            corpus,
+            {},
+            {"transforms": {"Join": {"required": [], "props": []}}, "connectors": {}, "connector_enum": []},
+        )
+
+    def _pipeline(self, tmp_path, params: str) -> str:
+        path = tmp_path / "join.yaml"
+        path.write_text(
+            "apiVersion: crd.ibm.k8s.io/v1\n"
+            "kind: FactPipeline\n"
+            "metadata: {name: t}\n"
+            "spec:\n"
+            "  jobs:\n"
+            "    - jobType: eid\n"
+            "      setups: {size: T}\n"
+            "      extract:\n"
+            "        - alias: A\n"
+            "          connections:\n"
+            "            - connector: cos\n"
+            "              credentials: cos\n"
+            "              query: a/b\n"
+            "      transform:\n"
+            "        - transformType: Join\n"
+            "          objectNames: [A, B]\n"
+            + params
+            + "          aliasResult: A\n",
+            encoding="utf-8",
+        )
+        return str(path)
+
+    def test_mixed_dialects(self, tmp_path) -> None:
+        path = self._pipeline(
+            tmp_path,
+            "          mapColumns: {ID: ID}\n"
+            "          joinMapping: {A.ID: B.ID}\n"
+            "          left: A\n"
+            "          right: B\n",
+        )
+        codes = [i.code for i in check(parse_pipeline(path), self._catalog())]
+        assert "C_JOIN_DIALECT_MIXED" in codes
+
+    def test_current_without_left_right(self, tmp_path) -> None:
+        path = self._pipeline(
+            tmp_path,
+            "          joinMapping: {A.ID: B.ID}\n",
+        )
+        codes = [i.code for i in check(parse_pipeline(path), self._catalog())]
+        assert "C_JOIN_DIALECT_INCOMPLETE" in codes

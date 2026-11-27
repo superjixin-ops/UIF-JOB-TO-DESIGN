@@ -186,6 +186,95 @@ def scan_corpus(root: str | Path, *, samples: int = 2) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------- 源码
+INJECTED = {
+    "self",
+    "spark_factory",
+    "config",
+    "data_objects_collection",
+    "token",
+    "object_names",
+}
+
+
+def _is_injected(name: str) -> bool:
+    """注入参数用 camelCase 写在签名里，集合里是 snake_case。"""
+    snake = re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+    return name in INJECTED or snake in INJECTED
+
+
+def _split_params(text: str) -> list[str]:
+    """按顶层逗号切参数，不切进 Optional[list] 这种嵌套结构。"""
+    out: list[str] = []
+    depth = 0
+    buf: list[str] = []
+    for ch in text:
+        if ch in "[({":
+            depth += 1
+        elif ch in "])}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            out.append("".join(buf))
+            buf = []
+            continue
+        buf.append(ch)
+    if buf:
+        out.append("".join(buf))
+    return [p.strip() for p in out if p.strip()]
+
+
+def parse_source(text: str, module: str = "") -> dict[str, dict[str, Any]]:
+    """从变换源码里读 `__init__` 签名。
+
+    为什么源码比文档权威：
+        文档写的是"应该怎么用"，源码写的是"不传会不会崩"。
+        `naturalKeys: list` 没有默认值，不传就是 TypeError——
+        这是必填的硬证据，文档的 `*` 只是排版。
+
+    注入参数（spark_factory / config / objectNames）不是 YAML 字段，跳过。
+    """
+    m = re.search(r"class\s+(\w+)\s*\([^)]*\)\s*:", text)
+    if not m:
+        return {}
+    cls = m.group(1)
+    sig = re.search(r"def\s+__init__\s*\((.*?)\)\s*(?:->[^:]+)?:", text, re.DOTALL)
+    if not sig:
+        return {}
+
+    params: dict[str, dict[str, Any]] = {}
+    for raw in _split_params(sig.group(1)):
+        if "=" in raw:
+            head, default = raw.split("=", 1)
+            required = False
+            default = default.strip()
+        else:
+            head, default, required = raw, None, True
+        if ":" not in head:
+            continue
+        name, typ = head.split(":", 1)
+        name = name.strip()
+        if not IDENT_RE.match(name) or _is_injected(name):
+            continue
+        params[name] = {
+            "required": required,
+            "type": typ.strip(),
+            "default": default,
+        }
+    return {cls: {"module": module, "params": params}}
+
+
+def scan_sources(root: str | Path) -> dict[str, dict[str, Any]]:
+    """扫一个源码目录，按类名合并。"""
+    out: dict[str, dict[str, Any]] = {}
+    for p in Path(root).glob("*.py"):
+        try:
+            got = parse_source(p.read_text(encoding="utf-8"), p.stem)
+        except (OSError, UnicodeDecodeError):
+            continue
+        out.update(got)
+    return out
+
+
 # ---------------------------------------------------------------- schema
 def load_schema(path: str | Path) -> dict[str, Any]:
     """从 pipeline-schema.json 里取每种变换/连接器的必填参数。
@@ -231,8 +320,19 @@ def trust_of(
     schema_required: bool,
     rate: float,
     count: int,
+    source_present: bool = False,
+    source_required: bool = False,
 ) -> str:
-    """一个参数该信谁。规则顺序不能换：越具体的证据越先判。"""
+    """一个参数该信谁。规则顺序不能换：越具体的证据越先判。
+
+    源码排第一：不传会崩，这是硬事实；文档的 `*` 只是排版。
+    """
+    if source_present:
+        if source_required:
+            return REQUIRED
+        if rate >= ALWAYS and count >= MIN_SAMPLES:
+            return CONVENTIONAL
+        return OPTIONAL
     if schema_required:
         return REQUIRED
     if doc_required:
@@ -252,34 +352,46 @@ def _card(
     doc: dict[str, Any] | None,
     schema: dict[str, Any] | None,
     universal: set[str],
+    source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     corpus = corpus or {"count": 0, "keys": {}, "samples": []}
     doc_params = {p["name"]: p for p in (doc or {}).get("params", [])}
+    source_params = (source or {}).get("params") or {}
     schema_required = set((schema or {}).get("required") or [])
     count = int(corpus.get("count") or 0)
 
     params: dict[str, dict[str, Any]] = {}
     names = {
         n
-        for n in set(doc_params) | set(corpus.get("keys") or {}) | schema_required - universal
+        for n in (
+            set(doc_params)
+            | set(corpus.get("keys") or {})
+            | schema_required
+            | set(source_params)
+        )
+        - universal
         if IDENT_RE.match(str(n))
     }
     for pname in sorted(names):
         hit = int((corpus.get("keys") or {}).get(pname, 0))
         rate = hit / count if count else 0.0
         d = doc_params.get(pname)
+        s = source_params.get(pname) or {}
         params[pname] = {
             "doc_required": bool(d and d["required"]),
             "schema_required": pname in schema_required,
+            "source_required": bool(s.get("required")),
             "rate": round(rate, 4),
             "count": hit,
-            "default": (d or {}).get("default"),
+            "default": s.get("default") or (d or {}).get("default"),
             "trust": trust_of(
                 doc_present=bool(d),
                 doc_required=bool(d and d["required"]),
                 schema_required=pname in schema_required,
                 rate=rate,
                 count=count,
+                source_present=pname in source_params,
+                source_required=bool(s.get("required")),
             ),
         }
 
@@ -301,10 +413,12 @@ def build(
     corpus: dict[str, Any],
     docs: dict[str, dict[str, Any]],
     schema: dict[str, Any],
+    sources: dict[str, dict[str, Any]] | None = None,
     *,
     version: int = 1,
 ) -> dict[str, Any]:
-    """合成字典。语料是主语，文档和 schema 是两票修正。"""
+    """合成字典。语料是主语，源码/文档/schema 是三票修正。"""
+    sources = sources or {}
     t_docs = {k: v for k, v in docs.items() if k in schema["transforms"] or k in corpus["transforms"]}
     c_docs = {
         k: v
@@ -313,13 +427,16 @@ def build(
     }
 
     transforms = {}
-    for name in sorted(set(corpus["transforms"]) | set(t_docs) | set(schema["transforms"])):
+    for name in sorted(
+        set(corpus["transforms"]) | set(t_docs) | set(schema["transforms"]) | set(sources)
+    ):
         transforms[name] = _card(
             name,
             corpus["transforms"].get(name),
             t_docs.get(name),
             schema["transforms"].get(name),
             UNIVERSAL_TRANSFORM,
+            sources.get(name),
         )
 
     connectors = {}
@@ -368,6 +485,28 @@ def check(facts: Any, catalog: dict[str, Any]) -> list[Issue]:
             # 不补这一行，每个 SparkSql 都会被误报"缺 query"。
             if t.sql is not None:
                 present.add("query")
+
+            # Join 有两套方言，混用是非法 YAML。集群跑哪一套不确定时，
+            # 至少要保证"一条 pipeline 里只用一种"。
+            if t.transform_type == "Join":
+                legacy = "mapColumns" in present
+                current = "joinMapping" in present
+                if legacy and current:
+                    issues.append(
+                        Issue(
+                            "C_JOIN_DIALECT_MIXED",
+                            f"{job.job_type}: Join 同时写了 mapColumns 和 joinMapping",
+                            "删掉其中一套；两套参数不能混",
+                        )
+                    )
+                elif current and not {"left", "right"} <= present:
+                    issues.append(
+                        Issue(
+                            "C_JOIN_DIALECT_INCOMPLETE",
+                            f"{job.job_type}: Join 用了 joinMapping 但缺 left/right",
+                            "current 方言必须同时写 left、right",
+                        )
+                    )
             for pname, meta in card["params"].items():
                 if meta["trust"] == REQUIRED and pname not in present:
                     issues.append(
