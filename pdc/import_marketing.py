@@ -373,3 +373,141 @@ def read_marketing(path: str | Path) -> DesignSpec:
         )
     finally:
         wb.close()
+
+
+# ---------------------------------------------------------------- 单表模板
+# 另一类文档：只有一张表，没有 DDL。
+# 表头里有 "Target Column" / "Column Type" / "Null"，按名字定位即可。
+# 少了 DDL 这道闸，只剩类型枚举和重名检查——所以警告里要说清楚。
+
+
+def detect_single(wb) -> bool:
+    """第一张表的表头里有 Target Column，且不是前一种模板。"""
+    if detect(wb):
+        return False
+    ws = wb[wb.sheetnames[0]]
+    first = next(ws.iter_rows(max_row=1, values_only=True), ())
+    return any(str(c).strip() == "Target Column" for c in first if c)
+
+
+def _pipeline_from_text(text: str) -> str:
+    """从 'fact/FACT_MARKET_INTENT_BOMBORA' 这类路径里取流水线名。
+
+    取不到返回空串，让调用方决定用什么兜底——不在这里编一个名字。
+    """
+    m = re.search(r"fact/([A-Za-z0-9_]+)", text or "")
+    if not m:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "-", m.group(1).lower()).strip("-")
+
+
+def read_single(path: str | Path) -> DesignSpec:
+    p = Path(path)
+    wb = load_workbook(p, data_only=True, read_only=True)
+    try:
+        ws = wb[wb.sheetnames[0]]
+        rows = [r for r in ws.iter_rows(values_only=True) if any(v is not None for v in r)]
+        if not rows:
+            raise SpecReadError("表格是空的")
+
+        header = [str(c).strip() if c else "" for c in rows[0]]
+        idx = {h: i for i, h in enumerate(header) if h}
+        if "Target Column" not in idx:
+            raise SpecReadError("表头里找不到 Target Column")
+
+        warnings: list[str] = ["这份文档没有 DDL 表，列契约只做了类型和重名校验"]
+
+        columns: list[SpecColumn] = []
+        seen: set[str] = set()
+        for row in rows[1:]:
+            name = _cell(row, idx, "Target Column")
+            if not name:
+                continue
+            name = str(name).strip()
+            if name in seen:
+                raise SpecReadError(f"目标列重名: {name}")
+            seen.add(name)
+            columns.append(
+                _to_column(
+                    name,
+                    str(_cell(row, idx, "Column Type") or ""),
+                    normalize(_cell(row, idx, "Null")) != "n",
+                )
+            )
+        if not columns:
+            raise SpecReadError("没有解析出任何目标列")
+
+        # 变换
+        transforms: list[SpecTransform] = []
+        step = 0
+        unknown: list[str] = []
+        for row in rows[1:]:
+            name = _cell(row, idx, "Target Column")
+            if not name:
+                continue
+            for col_name in ("Transformation 1", "Transformation 2"):
+                raw = _cell(row, idx, col_name)
+                if not raw:
+                    continue
+                types = map_transform(raw)
+                if not types:
+                    if not is_known(raw):
+                        unknown.append(f"{name}: {normalize(raw)[:60]}")
+                    continue
+                for t in types:
+                    step += 1
+                    transforms.append(
+                        SpecTransform(
+                            job="eid",
+                            step=step,
+                            transform_type=t,
+                            inputs=("SOURCE",),
+                            output="SOURCE",
+                            detail=normalize(raw)[:120],
+                        )
+                    )
+        if unknown:
+            warnings.append(
+                f"{len(unknown)} 条变换无法用规则映射，已跳过（需人工确认）："
+                + "；".join(unknown[:3])
+            )
+
+        # 流水线名：输出路径可能写在表头格里，也可能写在第一行数据里。
+        # 两处都扫一遍，取不到再用文件名兜底。
+        out_text = " ".join(str(c) for r in rows[:2] for c in r if c)
+        pipeline = _pipeline_from_text(out_text) or re.sub(
+            r"[^a-z0-9]+", "-", p.stem.lower()
+        ).strip("-")
+        table_name = pipeline.replace("-", "_").upper()
+
+        warnings.append("文档未提供连接信息，已填占位路径，需人工确认")
+
+        return DesignSpec(
+            pipeline=pipeline,
+            kind="FactPipeline",
+            owner="",
+            sizing="M",
+            jobs=("eid",),
+            job_sizes=(("eid", "M"),),
+            extracts=(
+                SpecExtract(
+                    job="eid", alias="SOURCE", connector="", credentials="",
+                    query=f"landing/{pipeline}", main_df=True,
+                ),
+            ),
+            transforms=tuple(transforms),
+            loads=(
+                SpecLoad(
+                    job="eid",
+                    object_name=table_name,
+                    query=f"fact/{table_name}",
+                    metadata_name=table_name,
+                    columns=tuple(columns),
+                    schema_declared=True,
+                ),
+            ),
+            source_path=str(p),
+            warnings=tuple(warnings),
+        )
+    finally:
+        wb.close()

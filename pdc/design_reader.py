@@ -326,6 +326,14 @@ def read_design(path: str | Path) -> DesignSpec:
         if _detect_marketing(wb):
             wb.close()
             return read_marketing(p)
+
+        from pdc.import_marketing import detect_single as _detect_single
+        from pdc.import_marketing import read_single
+
+        if _detect_single(wb):
+            wb.close()
+            return read_single(p)
+
         raise SpecReadError("缺 Overview 表：这份文档不是本工具产出的，请先确认表结构")
     overview: dict[str, str] = {}
     for row in _rows(ws):
