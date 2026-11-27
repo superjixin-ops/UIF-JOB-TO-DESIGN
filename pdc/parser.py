@@ -51,6 +51,22 @@ def _columns(raw_schema: object) -> tuple[Column, ...]:
     return tuple(out)
 
 
+def _names(value: object) -> tuple[str, ...]:
+    """把 naturalKey / partitionBy 统一成字符串元组。
+
+    真实语料里这两个字段既可能是列表，也可能是单个标量：
+        partitionBy: PARTKEY
+    按字符串迭代会把它拆成 P, A, R, T, K, E, Y——不报错，但分区键全错。
+    """
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, (list, tuple)):
+        return tuple(str(x) for x in value)
+    return (str(value),)
+
+
 def _extract(raw: dict, index: int = 0) -> ExtractSpec:
     """解析一个 extract。
 
@@ -81,7 +97,7 @@ def _extract(raw: dict, index: int = 0) -> ExtractSpec:
             or ""
         ),
         main_df=bool(raw.get("main_df", False)),
-        natural_key=tuple(str(k) for k in (conn.get("naturalKey") or ())),
+        natural_key=_names(conn.get("naturalKey")),
         extract_type=str(raw.get("extractType", "default")),
         conn_alias=str(conn.get("alias", "")),
         key_name=str(conn.get("keyName", "")),
@@ -129,7 +145,7 @@ def _load(raw: dict | None) -> LoadSpec | None:
             query=str(c.get("query", "")),
             mode=str(c.get("mode", "")),
             partitions=c.get("numPartitions"),
-            partition_by=tuple(str(x) for x in (c.get("partitionBy") or ())),
+            partition_by=_names(c.get("partitionBy")),
             load_object=str(c.get("loadObject", "")),
         )
         for c in conns
@@ -142,7 +158,7 @@ def _load(raw: dict | None) -> LoadSpec | None:
         query=str(query),
         partitions=conn.get("numPartitions"),
         schema=_columns(raw.get("schema")),
-        partition_by=tuple(str(p) for p in (conn.get("partitionBy") or ())),
+        partition_by=_names(conn.get("partitionBy")),
         objects=objects,
         credentials=str(conn.get("credentials", "")),
         conn_alias=str(conn.get("alias", "")),

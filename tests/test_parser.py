@@ -96,3 +96,39 @@ def test_drop_and_rename_are_collected():
     dropped, renamed = dropped_and_renamed(facts.jobs[1])
     assert "WAREHOUSE_CODE" in dropped
     assert renamed["ORDER_FULFILLMENT_KEY"] == "SK_ORDER_FULFILLMENT"
+
+
+def test_scalar_partition_by_is_one_name(tmp_path):
+    """真实语料里有 `partitionBy: PARTKEY`。
+
+    按字符串迭代会变成 P,A,R,T,K,E,Y——不报错，但分区键全错。
+    这是跑 5,831 条真实语料时抓到的，12 条样例覆盖不到。
+    """
+    f = tmp_path / "scalar.yaml"
+    f.write_text(
+        "apiVersion: crd.ibm.k8s.io/v1\n"
+        "kind: FactPipeline\n"
+        "metadata: {name: scalar-partition}\n"
+        "spec:\n"
+        "  jobs:\n"
+        "    - jobType: eid\n"
+        "      setups: {size: T}\n"
+        "      extract:\n"
+        "        - alias: SRC\n"
+        "          main_df: true\n"
+        "          connections:\n"
+        "            - connector: cos\n"
+        "              credentials: cos\n"
+        "              query: a/b\n"
+        "              naturalKey: SRC_KEY\n"
+        "      load:\n"
+        "        connections:\n"
+        "          - connector: cos\n"
+        "            credentials: cos\n"
+        "            query: a/b\n"
+        "            partitionBy: PARTKEY\n",
+        encoding="utf-8",
+    )
+    facts = parse_pipeline(f)
+    assert facts.jobs[0].load.partition_by == ("PARTKEY",)
+    assert facts.jobs[0].extracts[0].natural_key == ("SRC_KEY",)
