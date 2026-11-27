@@ -82,3 +82,58 @@ DERIVED_ALIASES = (
 def allowed_aliases(family: dict[str, dict[str, Any]] = MARKETING_INTENT) -> tuple[str, ...]:
     """这个家族允许出现的全部数据源别名。"""
     return tuple(str(v["alias"]) for v in family.values()) + DERIVED_ALIASES
+
+
+# ---------------------------------------------------------------- Join 方言
+# 平台上有两套 Join，参数完全不同：
+#
+#   legacy    mapColumns + how + mergeColumns + renameColumns
+#             5,831 条语料里 12,932 次，占 99.9%
+#   current   joinMapping + left + right（官方文档要求的形状）
+#             语料里 0%
+#
+# 生成时必须显式选一套。默认 legacy，因为集群上跑的是它；
+# 升级平台后把这里改成 "current"，而不是让模型每次猜。
+JOIN_DIALECT = "legacy"
+
+
+def join_step(
+    left: str,
+    right: str,
+    mapping: dict[str, str],
+    *,
+    alias: str,
+    how: str = "left",
+    merge_columns: list[str] | None = None,
+    rename_columns: dict[str, str] | None = None,
+    dialect: str | None = None,
+) -> dict[str, Any]:
+    """按选定的方言生成一个 Join 变换。
+
+    legacy 的 mapColumns 是"右表列 -> 左表列"的映射；
+    current 的 joinMapping 要求每列带表名限定，并且必须写 left/right。
+    两种形状不能混，混了就是非法 YAML。
+    """
+    mode = dialect or JOIN_DIALECT
+    if mode == "current":
+        qualified = {
+            f"{left}.{lcol}": f"{right}.{rcol}" for rcol, lcol in mapping.items()
+        }
+        return {
+            "transformType": "Join",
+            "objectNames": [left, right],
+            "left": left,
+            "right": right,
+            "joinMapping": qualified,
+            "how": how,
+            "aliasResult": alias,
+        }
+    return {
+        "transformType": "Join",
+        "objectNames": [left, right],
+        "how": how,
+        "mapColumns": dict(mapping),
+        "mergeColumns": list(merge_columns or []),
+        "renameColumns": dict(rename_columns or {}),
+        "aliasResult": alias,
+    }

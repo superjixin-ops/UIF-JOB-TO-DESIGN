@@ -8,7 +8,7 @@
 |---|---|
 | 仓库 | [superjixin-ops/UIF-JOB-TO-DESIGN](https://github.com/superjixin-ops/UIF-JOB-TO-DESIGN) |
 | 在线演示 | `https://3eea34987613e6.app.lhr.life`（临时隧道，token `demo-token`） |
-| 规模 | **345 测试通过 / 1 跳过** · 52 模块 · 12,749 行主代码 + 4,381 行测试 · mypy 0 错误 · 覆盖率 79% |
+| 规模 | **366 测试通过 / 1 跳过** · 53 模块 · 13,369 行主代码 + 4,758 行测试 · mypy 0 错误 · 覆盖率 79% |
 | 效果 | 设计文档 **4 小时 → 13 秒**；反向生成 **留一法 12/12 通过**，平均 1.92 轮、单条约 5.6 万 token；**模板家族 71 个变换 0 token**；设计文档零丢字段；143 个键值与源文件零差异 |
 | 技术栈 | Python 3.12 · FastAPI · asyncio · SQLite · LangGraph · LangChain · MCP · pgvector |
 | 只看结论 | [一页纸](docs/one-pager.md)——3 个数字、3 句话、5 个边界，无代码 |
@@ -69,6 +69,38 @@ uv run pdc parse out/fact-order-fulfillment.yaml
 | 与手写实现对齐 | 结构不同 | **变换类型分布逐项相同** |
 | token | 约 11 万 | **0** |
 | 耗时 | 约 40 秒 | **0.2 秒** |
+
+**变换字典**（离线构建一次，生成时只读 JSON）：
+
+```bash
+# 1) 抓下来的官方文档 -> docs.json
+uv run pdc catalog docs --html-dir out/uif-docs --out out/uif-docs.json
+
+# 2) 语料 + 文档 + schema -> 字典
+uv run pdc catalog build --corpus /path/to/pipelines \
+  --docs out/uif-docs.json --schema /path/to/pipeline-schema.json \
+  --out out/catalog.json
+
+# 3) 查一种变换的"规范写法"
+uv run pdc catalog show Sort
+
+# 4) 拿字典检查一条 pipeline
+uv run pdc catalog check out/fact-market-intent-bombora.yaml
+```
+
+每个参数都有一个 `trust`，回答"该信谁"：
+
+| trust | 含义 | 生成时 |
+|---|---|---|
+| `required` | schema 必填，或文档必填且语料 ≥50% | 必写 |
+| `conventional` | 文档说可选，语料 ≥95% 都写 | 写 |
+| `undocumented` | 文档没写，语料 ≥95% 都写 | 写，标 warning |
+| `conflict` | 文档说必填，语料 <50% | 报警，按平台版本决定 |
+| `deprecated` | 文档有，语料 0% | 不写 |
+| `optional` | 其余 | 按需 |
+
+**为什么不是向量库**：这里的查询是精确的（"`Sort` 的参数形状"），
+一次哈希查找就够。向量只用于"这句话该归到哪个类型"，是另一层。
 
 **控制流三件事**：
 
@@ -187,7 +219,8 @@ pdc/
   derive_sources.py        从叙述里推导数据源（join/lookup/merge）
   plan.py                  需求 → 实现计划（确定性，认识的模板家族）
   emit.py                  计划 → YAML（纯函数）
-  profiles.py              模板家族的连接约定（别名、路径、连接器）
+  profiles.py              模板家族的连接约定（别名、路径、连接器、Join 方言）
+  catalog.py               变换字典：语料用法 + 文档语义 + schema 合法性
   yamlgen.py               模型写 YAML 的循环（不认识的文档走这里）
   agent.py                 ReAct 循环 + 预算 + 取消
   planner.py               Plan-and-Execute
@@ -212,7 +245,7 @@ pdc/
 ops/       告警规则 + 检查脚本
 eval/      四指标评测 + 审计 golden set + 反向生成留一法 + 逐键保真审计
 rag/       检索评测（样例语料可复现）、α 扫描、A/B、引用分析
-tests/     346 个用例（345 通过 / 1 跳过）
+tests/     367 个用例（366 通过 / 1 跳过）
 loadtest/  并发压测
 samples/   虚构样例数据（可公开）
 scripts/   本地启动 + 隧道 + 语料结构统计

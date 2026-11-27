@@ -576,6 +576,73 @@ def cmd_skills(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_catalog(args: argparse.Namespace) -> int:
+    """变换字典：语料 + 官方文档 + schema 三方合成。
+
+    为什么单独一个命令：
+        字典是离线产物。构建一次，生成时只读 JSON，
+        不联网、不调模型、不重新扫 5,831 条流水线。
+    """
+    from pdc import catalog as cat
+    from pdc.parser import PipelineParseError, parse_pipeline
+
+    if args.action == "docs":
+        html_dir = Path(args.html_dir)
+        if not html_dir.exists():
+            print(f"找不到目录: {html_dir}", file=sys.stderr)
+            return 2
+        docs: dict = {}
+        for page in sorted(html_dir.glob("*.html")):
+            docs.update(cat.parse_doc_html(page.read_text(errors="ignore"), page.stem))
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(docs, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(json.dumps({"types": len(docs), "out": str(out)}, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.action == "build":
+        corpus_dir = Path(args.corpus)
+        schema_path = Path(args.schema)
+        if not corpus_dir.exists() or not schema_path.exists():
+            print("--corpus 和 --schema 都必须存在", file=sys.stderr)
+            return 2
+        corpus = cat.scan_corpus(corpus_dir)
+        docs = cat.load_docs(args.docs) if args.docs else {}
+        built = cat.build(corpus, docs, cat.load_schema(schema_path))
+        out = cat.write(built, args.out)
+        print(json.dumps({
+            "pipelines": built["source"]["pipelines"],
+            "transforms": built["source"]["transforms"],
+            "types": len(built["transforms"]),
+            "connectors": len(built["connectors"]),
+            "out": str(out),
+        }, ensure_ascii=False, indent=2))
+        return 0
+
+    catalog_path = Path(args.catalog)
+    if not catalog_path.exists():
+        print(f"字典不存在: {catalog_path}，先跑 catalog build", file=sys.stderr)
+        return 2
+    built = cat.load(catalog_path)
+
+    if args.action == "show":
+        card = built["transforms"].get(args.target) or built["connectors"].get(args.target)
+        if card is None:
+            print(f"字典里没有 {args.target}", file=sys.stderr)
+            return 2
+        print(json.dumps(card, ensure_ascii=False, indent=2))
+        return 0
+
+    try:
+        facts = parse_pipeline(args.target)
+    except PipelineParseError as exc:
+        print(f"读不了 pipeline: {exc}", file=sys.stderr)
+        return 2
+    issues = cat.check(facts, built)
+    print(json.dumps([i.to_dict() for i in issues], ensure_ascii=False, indent=2))
+    return 1 if issues else 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """检查配置：一次报全部问题，而不是启动后逐个撞。"""
     from pdc.config import ConfigError, Settings
@@ -746,6 +813,17 @@ def main(argv: list[str] | None = None) -> int:
 
     doc = sub.add_parser("doctor", help="检查配置（不启动服务）")
     doc.set_defaults(func=cmd_doctor)
+
+    ca = sub.add_parser("catalog", help="变换字典：语料 + 文档 + schema")
+    ca.add_argument("action", choices=["build", "docs", "show", "check"])
+    ca.add_argument("target", nargs="?", default="", help="show 的类型名，或 check 的 YAML 路径")
+    ca.add_argument("--corpus", default="", help="真实流水线目录")
+    ca.add_argument("--docs", default="", help="抓取阶段产出的 docs.json")
+    ca.add_argument("--schema", default="", help="pipeline-schema.json")
+    ca.add_argument("--html-dir", default="", help="docs 动作：抓下来的 HTML 目录")
+    ca.add_argument("--out", default="out/catalog.json")
+    ca.add_argument("--catalog", default="out/catalog.json")
+    ca.set_defaults(func=cmd_catalog)
 
     bk = sub.add_parser("backup", help="备份 / 校验 / 恢复 SQLite")
     bk.add_argument("action", choices=["create", "verify", "restore"])
